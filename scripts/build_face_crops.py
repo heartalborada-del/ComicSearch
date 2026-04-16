@@ -8,6 +8,7 @@ from typing import Iterable
 
 import cv2
 import numpy as np
+from ultralytics import YOLO
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -45,26 +46,55 @@ def expand_bbox(
 
 
 def detect_faces(
-    gray_image: np.ndarray,
-    detector: cv2.CascadeClassifier,
+    image: np.ndarray,
+    detector: YOLO,
     confidence_threshold: float,
     max_detections_per_image: int,
+    class_ids: list[int] | None,
 ) -> list[Detection]:
     detections: list[Detection] = []
-    rects, _, level_weights = detector.detectMultiScale3(
-        gray_image,
-        scaleFactor=1.1,
-        minNeighbors=3,
-        outputRejectLevels=True,
+    results = detector.predict(
+        source=image,
+        conf=confidence_threshold,
+        classes=class_ids,
+        verbose=False,
     )
-    for (x, y, w, h), score in zip(rects, level_weights):
-        score_value = float(score)
-        if score_value < confidence_threshold:
+    if not results:
+        return detections
+
+    boxes = results[0].boxes
+    if boxes is None:
+        return detections
+
+    for box in boxes:
+        coords = box.xyxy[0].tolist()
+        if len(coords) != 4:
             continue
-        detections.append(Detection((int(x), int(y), int(x + w), int(y + h)), score_value))
+        x1, y1, x2, y2 = (int(max(0, round(value))) for value in coords)
+        if x2 <= x1 or y2 <= y1:
+            continue
+        if box.conf is None or int(box.conf.numel()) == 0:
+            continue
+        score_value = float(box.conf[0].item())
+        detections.append(Detection((x1, y1, x2, y2), score_value))
 
     detections.sort(key=lambda detection: detection.score, reverse=True)
     return detections[:max_detections_per_image]
+
+
+def parse_yolo_classes(raw: str | None) -> list[int] | None:
+    if raw is None or raw.strip() == "":
+        return None
+    values: list[int] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if token == "":
+            continue
+        try:
+            values.append(int(token))
+        except ValueError as exc:
+            raise ValueError(f"invalid --yolo-classes value '{token}': expected integers like '0,1'") from exc
+    return values if values else None
 
 
 def build_face_crops(args: argparse.Namespace) -> None:
@@ -74,29 +104,29 @@ def build_face_crops(args: argparse.Namespace) -> None:
     output_crop_root.mkdir(parents=True, exist_ok=True)
     output_manifest.parent.mkdir(parents=True, exist_ok=True)
 
-    cascade_path = (
-        Path(args.cascade_model).resolve()
-        if args.cascade_model
-        else Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
-    )
-    detector = cv2.CascadeClassifier(str(cascade_path))
-    if detector.empty():
-        raise RuntimeError(f"failed to load haarcascade detector: {cascade_path}")
+    yolo_model_path = Path(args.yolo_model).resolve()
+    if not yolo_model_path.exists():
+        raise FileNotFoundError(
+            f"YOLO model file not found: {yolo_model_path} (expected a local .pt or .onnx model file)"
+        )
+    detector = YOLO(str(yolo_model_path))
+    class_ids = parse_yolo_classes(args.yolo_classes)
 
     written = 0
     scanned = 0
+    bbox_expand_ratio = float(args.bbox_expand_ratio)
     with output_manifest.open("w", encoding="utf-8") as manifest_fp:
         for image_path in iter_image_paths(input_root):
             scanned += 1
             image = cv2.imread(str(image_path))
             if image is None:
                 continue
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             detections = detect_faces(
-                gray_image=gray,
+                image=image,
                 detector=detector,
                 confidence_threshold=float(args.confidence_threshold),
                 max_detections_per_image=int(args.max_detections_per_image),
+                class_ids=class_ids,
             )
             if not detections:
                 continue
@@ -104,7 +134,7 @@ def build_face_crops(args: argparse.Namespace) -> None:
             relative = image_path.relative_to(input_root)
             stem = relative.with_suffix("")
             for index, detection in enumerate(detections):
-                expanded = expand_bbox(detection.bbox, gray.shape, float(args.bbox_expand_ratio))
+                expanded = expand_bbox(detection.bbox, image.shape[:2], bbox_expand_ratio)
                 x1, y1, x2, y2 = expanded
                 if min(x2 - x1, y2 - y1) < int(args.min_crop_size):
                     continue
@@ -165,9 +195,14 @@ def parse_args() -> argparse.Namespace:
         help="Bounding box expansion ratio before cropping.",
     )
     parser.add_argument(
-        "--cascade-model",
+        "--yolo-model",
+        required=True,
+        help="Path to YOLO model file (.pt/.onnx).",
+    )
+    parser.add_argument(
+        "--yolo-classes",
         default=None,
-        help="Optional Haar cascade XML path. Defaults to OpenCV frontal face cascade.",
+        help="Optional comma-separated class ids to keep (e.g. '0,1'). Defaults to all classes.",
     )
     return parser.parse_args()
 
