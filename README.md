@@ -119,6 +119,7 @@ Payload includes:
 - `manga_id`, `pack_id`, `keyword_ids`, `cover_thumb_path`
 - `page_no`, `page_path`, `source_type`
 - crop metadata when applicable: `crop_bbox`, `crop_score`, `crop_original_path`
+- when `--face-crops-manifest` is provided, original page vectors in the manifest are also indexed (deduplicated by page path/point id)
 
 Optional config:
 - `--keyword-map /abs/path/keyword_map.json` where JSON format is `{"<abs page path>": [1,2]}`

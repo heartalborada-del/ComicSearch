@@ -145,6 +145,27 @@ def build_keyword_ids(
     return sorted(ids)
 
 
+def build_page_payload(
+    page_path: str,
+    keyword_map: dict[str, list[int]],
+    metadata_tags_by_path: dict[str, list[str]],
+    global_tags: list[str],
+    tag_id_map: dict[str, int],
+) -> dict[str, Any]:
+    return {
+        "manga_id": parse_int_from_tokens(page_path, "manga"),
+        "pack_id": parse_int_from_tokens(page_path, "pack"),
+        "keyword_ids": build_keyword_ids(page_path, keyword_map, metadata_tags_by_path, global_tags, tag_id_map),
+        "cover_thumb_path": "",
+        "page_no": parse_page_no(page_path),
+        "page_path": page_path,
+        "source_type": "page",
+        "crop_bbox": None,
+        "crop_score": None,
+        "crop_original_path": None,
+    }
+
+
 def iter_page_items(
     dataset_roots: list[Path],
     keyword_map: dict[str, list[int]],
@@ -157,24 +178,38 @@ def iter_page_items(
             if not image_path.is_file() or image_path.suffix.lower() not in IMAGE_EXTENSIONS:
                 continue
             path_str = str(image_path)
-            manga_id = parse_int_from_tokens(path_str, "manga")
-            pack_id = parse_int_from_tokens(path_str, "pack")
-            page_no = parse_page_no(path_str)
-            payload = {
-                "manga_id": manga_id,
-                "pack_id": pack_id,
-                "keyword_ids": build_keyword_ids(path_str, keyword_map, metadata_tags_by_path, global_tags, tag_id_map),
-                "cover_thumb_path": "",
-                "page_no": page_no,
-                "page_path": path_str,
-                "source_type": "page",
-                "crop_bbox": None,
-                "crop_score": None,
-                "crop_original_path": None,
-            }
+            payload = build_page_payload(path_str, keyword_map, metadata_tags_by_path, global_tags, tag_id_map)
             yield IndexItem(
                 point_id=make_point_id("page", image_path),
                 image_path=image_path,
+                payload=payload,
+            )
+
+
+def iter_manifest_original_items(
+    crop_manifest_path: Path,
+    keyword_map: dict[str, list[int]],
+    metadata_tags_by_path: dict[str, list[str]],
+    global_tags: list[str],
+    tag_id_map: dict[str, int],
+) -> Iterable[IndexItem]:
+    if not crop_manifest_path.exists():
+        return
+    seen_original_paths: set[Path] = set()
+    with crop_manifest_path.open("r", encoding="utf-8") as fp:
+        for line in fp:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            original_image_path = Path(row["original_image_path"]).resolve()
+            if original_image_path in seen_original_paths:
+                continue
+            seen_original_paths.add(original_image_path)
+            original_path_str = str(original_image_path)
+            payload = build_page_payload(original_path_str, keyword_map, metadata_tags_by_path, global_tags, tag_id_map)
+            yield IndexItem(
+                point_id=make_point_id("page", original_image_path),
+                image_path=original_image_path,
                 payload=payload,
             )
 
@@ -321,11 +356,25 @@ def run_indexing(args: argparse.Namespace) -> None:
     processed_ids = set() if args.reset_state else load_state(state_path)
 
     all_items: list[IndexItem] = []
-    for item in iter_page_items(dataset_roots, keyword_map, metadata_tags_by_path, global_tags, tag_id_map):
-        if item.point_id in processed_ids or not item.image_path.exists():
-            continue
+    seen_item_ids: set[str] = set()
+
+    def append_item(item: IndexItem) -> None:
+        if item.point_id in processed_ids or item.point_id in seen_item_ids or not item.image_path.exists():
+            return
+        seen_item_ids.add(item.point_id)
         all_items.append(item)
+
+    for item in iter_page_items(dataset_roots, keyword_map, metadata_tags_by_path, global_tags, tag_id_map):
+        append_item(item)
     if args.face_crops_manifest:
+        for item in iter_manifest_original_items(
+            Path(args.face_crops_manifest).resolve(),
+            keyword_map,
+            metadata_tags_by_path,
+            global_tags,
+            tag_id_map,
+        ):
+            append_item(item)
         for item in iter_crop_items(
             Path(args.face_crops_manifest).resolve(),
             keyword_map,
@@ -333,9 +382,7 @@ def run_indexing(args: argparse.Namespace) -> None:
             global_tags,
             tag_id_map,
         ):
-            if item.point_id in processed_ids or not item.image_path.exists():
-                continue
-            all_items.append(item)
+            append_item(item)
 
     if not all_items:
         print(json.dumps({"status": "noop", "reason": "no new items to index"}, ensure_ascii=False))
