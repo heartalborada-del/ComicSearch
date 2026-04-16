@@ -1,7 +1,7 @@
 # ComicSearch
 
 FastAPI-based manga/comic image search backend with:
-- SQLAlchemy ORM (`manga`, `pack`, `keyword`, `pack_keyword`)
+- SQLAlchemy ORM (`manga`, `pack`, `keyword`, `pack_keyword`, `tag_id_map`)
 - ONNXRuntime image embeddings (CPU-first, CLIP-style preprocessing)
 - Qdrant vector retrieval with AND keyword filtering and manga-level ranking
 
@@ -102,6 +102,10 @@ Manifest JSONL fields:
 - `bbox` (`[x1,y1,x2,y2]`)
 - `score`
 
+Notes:
+- `build_face_crops.py` supports one-level pack directory recursion under `--input-root`.
+- Crop images preserve the original directory structure relative to `--input-root`.
+
 ## Index all datasets into Qdrant + SQL DB
 
 Index full pages and optional face-crop subset:
@@ -124,14 +128,27 @@ Payload includes:
 - crop metadata when applicable: `crop_bbox`, `crop_score`, `crop_original_path`
 
 Optional config:
-- `--keyword-map /abs/path/keyword_map.json` where JSON format is `{"<abs page path>": [1,2]}`
-- `--dataset-metadata /abs/path/metadata.json` where format supports:
-  - global tags: `{"tags": ["tagA", "tagB"]}`
-  - per-page tags: `{"<abs or relative page path>": {"tags": ["tagA"]}}`
 - `--tag-id-map /abs/path/tag_id_map.json` where format is `{"tagA": 1, "tagB": 2}`
-  - tags from metadata are mapped to `keyword_ids` using this map
+  - tags from each dataset root's `metadata.json` are mapped to `keyword_ids` using this map (case-insensitive)
+  - if a tag is missing in the provided map, the indexer falls back to the DB `tag_id_map`; if both are missing, indexing fails fast
+  - if duplicate ids conflict with DB mappings, DB mappings are used; if no DB mapping exists for that id, indexing fails fast
 - `--db-url sqlite:///./comicsearch.db` (or any SQLAlchemy URL) for normal DB indexing (`manga/pack/keyword/pack_keyword`)
 - `--reset-state` to re-index everything from scratch
+
+Each dataset root must contain a `metadata.json` file with this shape:
+
+```json
+{
+  "title": "album title",
+  "tags": ["tagA", "tagB"]
+}
+```
+
+The `title` value is stored in `pack.title`.
+
+Dataset root discovery rules:
+- for each `--datasets-root`, if `metadata.json` exists in that directory, it is treated as a dataset root
+- first-level subdirectories with `metadata.json` are also auto-discovered as dataset roots
 
 ## ORM and DB
 

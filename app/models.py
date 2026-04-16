@@ -36,6 +36,13 @@ class Keyword(Base):
     name: Mapped[str] = mapped_column(String, unique=True, nullable=False)
 
 
+class TagIdMap(Base):
+    __tablename__ = "tag_id_map"
+
+    tag: Mapped[str] = mapped_column(String, primary_key=True)
+    keyword_id: Mapped[int] = mapped_column(ForeignKey("keyword.id", ondelete="CASCADE"), unique=True, nullable=False)
+
+
 class PackKeyword(Base):
     __tablename__ = "pack_keyword"
 

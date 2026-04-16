@@ -22,7 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.embedder_onnx import OnnxImageEmbedder
-from app.models import Base, Keyword, Manga, Pack, PackKeyword
+from app.models import Base, Keyword, Manga, Pack, PackKeyword, TagIdMap
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -34,6 +34,13 @@ class IndexItem:
     point_id: str
     image_path: Path
     payload: dict[str, Any]
+    pack_title: str | None = None
+
+
+@dataclass(frozen=True)
+class DatasetMetadata:
+    title: str
+    tags: list[str]
 
 
 @lru_cache(maxsize=16)
@@ -63,6 +70,32 @@ def make_point_id(source_type: str, image_path: Path, extra: str = "") -> str:
     return digest
 
 
+def discover_dataset_roots(root_args: list[str]) -> list[Path]:
+    discovered: list[Path] = []
+    seen: set[Path] = set()
+    for root_arg in root_args:
+        base_root = Path(root_arg).resolve()
+        if not base_root.exists() or not base_root.is_dir():
+            raise FileNotFoundError(f"datasets root not found: {base_root}")
+
+        candidates: list[Path] = []
+        if (base_root / "metadata.json").exists():
+            candidates.append(base_root)
+        for child in sorted(base_root.iterdir()):
+            if child.is_dir() and (child / "metadata.json").exists():
+                candidates.append(child.resolve())
+
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            if resolved not in seen:
+                discovered.append(resolved)
+                seen.add(resolved)
+
+    if not discovered:
+        raise ValueError("no dataset roots found: expected metadata.json in each dataset root or its first-level subdirectories")
+    return discovered
+
+
 def load_tag_id_map(path: Path | None) -> dict[str, int]:
     if path is None:
         return {}
@@ -77,82 +110,122 @@ def load_tag_id_map(path: Path | None) -> dict[str, int]:
         if not isinstance(key, str):
             continue
         try:
-            result[key] = int(value)
+            result[key.lower()] = int(value)
         except (TypeError, ValueError):
             continue
     return result
 
 
-def load_dataset_metadata(path: Path | None, dataset_roots: list[Path]) -> tuple[dict[str, list[str]], list[str]]:
-    """Load metadata json.
+def load_dataset_metadata(dataset_roots: list[Path]) -> dict[Path, DatasetMetadata]:
+    """Load per-root metadata.json files.
 
-    Supported formats:
-    1) {"tags": ["a", "b"]}                        -> global tags for all pages
-    2) {"/abs/page.jpg": {"tags": ["a"]}, ...}     -> per-page tags
-    3) {"relative/page.jpg": {"tags": ["a"]}, ...} -> resolved under --datasets-root
+    Expected format for each dataset root:
+    {"title": "album title", "tags": ["a", "b"]}
     """
-    if path is None:
-        return {}, []
-    if not path.exists():
-        raise FileNotFoundError(f"dataset metadata file not found: {path}")
-    with path.open("r", encoding="utf-8") as fp:
-        data = json.load(fp)
-    if not isinstance(data, dict):
-        raise ValueError('dataset metadata must be a JSON object')
-    if isinstance(data.get("tags"), list):
-        return {}, [str(tag) for tag in data["tags"] if isinstance(tag, (str, int, float))]
 
-    metadata_tags_by_path: dict[str, list[str]] = {}
-    for key, value in data.items():
-        tags: list[str] = []
-        if isinstance(value, dict) and isinstance(value.get("tags"), list):
-            tags = [str(tag) for tag in value["tags"] if isinstance(tag, (str, int, float))]
-        elif isinstance(value, list):
-            tags = [str(tag) for tag in value if isinstance(tag, (str, int, float))]
-        if not tags:
-            continue
+    metadata_by_root: dict[Path, DatasetMetadata] = {}
+    for dataset_root in dataset_roots:
+        metadata_path = dataset_root / "metadata.json"
+        if not metadata_path.exists():
+            raise FileNotFoundError(f"dataset metadata file not found: {metadata_path}")
+        with metadata_path.open("r", encoding="utf-8") as fp:
+            data = json.load(fp)
+        if not isinstance(data, dict):
+            raise ValueError(f"dataset metadata must be a JSON object: {metadata_path}")
 
-        raw_path = Path(key)
-        if raw_path.is_absolute():
-            resolved = raw_path.resolve()
-            metadata_tags_by_path[str(resolved)] = tags
-            continue
-        matched = False
-        for root in dataset_roots:
-            candidate = (root / raw_path).resolve()
-            if candidate.exists():
-                metadata_tags_by_path[str(candidate)] = tags
-                matched = True
-                break
-        if not matched:
-            metadata_tags_by_path[str(raw_path.resolve())] = tags
-    return metadata_tags_by_path, []
+        title = data.get("title")
+        if not isinstance(title, (str, int, float)):
+            raise ValueError(f'dataset metadata must contain a string "title": {metadata_path}')
+
+        tags_value = data.get("tags", [])
+        if not isinstance(tags_value, list):
+            raise ValueError(f'dataset metadata "tags" must be a list: {metadata_path}')
+
+        metadata_by_root[dataset_root.resolve()] = DatasetMetadata(
+            title=str(title),
+            tags=[str(tag) for tag in tags_value if isinstance(tag, (str, int, float))],
+        )
+    return metadata_by_root
 
 
-def build_keyword_ids(
-    page_path: str,
-    keyword_map: dict[str, list[int]],
-    metadata_tags_by_path: dict[str, list[str]],
-    global_tags: list[str],
-    tag_id_map: dict[str, int],
-) -> list[int]:
-    ids = {int(v) for v in keyword_map.get(page_path, [])}
-    tags = metadata_tags_by_path.get(page_path, global_tags)
-    for tag in tags:
-        keyword_id = tag_id_map.get(tag)
-        if keyword_id is not None:
-            ids.add(int(keyword_id))
+def find_dataset_root(path: Path, dataset_roots: list[Path]) -> Path | None:
+    resolved_path = path.resolve()
+    matched_roots = [root for root in dataset_roots if resolved_path.is_relative_to(root)]
+    if not matched_roots:
+        return None
+    return max(matched_roots, key=lambda root: len(root.parts))
+
+
+def build_keyword_ids(metadata_tags: list[str], tag_id_map: dict[str, int], context_path: str) -> list[int]:
+    ids: set[int] = set()
+    for tag in metadata_tags:
+        normalized_tag = tag.lower()
+        keyword_id = tag_id_map.get(normalized_tag)
+        if keyword_id is None:
+            raise ValueError(f'tag "{tag}" used in metadata for {context_path} is missing in tag-id map and database')
+        ids.add(int(keyword_id))
     return sorted(ids)
+
+
+def load_db_tag_id_map(session: Session) -> tuple[dict[str, int], dict[int, str]]:
+    tag_to_id: dict[str, int] = {}
+    id_to_tag: dict[int, str] = {}
+    for row in session.query(TagIdMap).all():
+        normalized = row.tag.lower()
+        tag_to_id[normalized] = int(row.keyword_id)
+        id_to_tag[int(row.keyword_id)] = row.tag
+    return tag_to_id, id_to_tag
+
+
+def resolve_effective_tag_maps(
+    map_tag_to_id: dict[str, int],
+    db_tag_to_id: dict[str, int],
+    db_id_to_tag: dict[int, str],
+) -> tuple[dict[str, int], dict[int, str]]:
+    effective_tag_to_id = dict(db_tag_to_id)
+    effective_id_to_tag = dict(db_id_to_tag)
+
+    for tag, keyword_id in map_tag_to_id.items():
+        existing_id_for_tag = effective_tag_to_id.get(tag)
+        if existing_id_for_tag is not None:
+            # DB mapping is authoritative when map conflicts with an existing tag.
+            continue
+
+        existing_tag_for_id = effective_id_to_tag.get(int(keyword_id))
+        if existing_tag_for_id is not None and existing_tag_for_id.lower() != tag:
+            if int(keyword_id) in db_id_to_tag:
+                # Duplicate id found but DB already has this id mapping, so keep DB mapping.
+                continue
+            raise ValueError(
+                f'duplicate keyword id {keyword_id} for tags "{existing_tag_for_id}" and "{tag}" without DB mapping'
+            )
+
+        effective_tag_to_id[tag] = int(keyword_id)
+        effective_id_to_tag[int(keyword_id)] = tag
+
+    return effective_tag_to_id, effective_id_to_tag
+
+
+def validate_used_keyword_ids(items: list[IndexItem], keyword_names_by_id: dict[int, str]) -> None:
+    used_keyword_ids: set[int] = set()
+    for item in items:
+        for keyword_id in item.payload.get("keyword_ids") or []:
+            used_keyword_ids.add(int(keyword_id))
+
+    missing = sorted(keyword_id for keyword_id in used_keyword_ids if keyword_id not in keyword_names_by_id)
+    if missing:
+        raise ValueError(
+            "keyword ids used but missing in tag-id map and database: " + ", ".join(str(keyword_id) for keyword_id in missing)
+        )
 
 
 def iter_page_items(
     dataset_roots: list[Path],
-    keyword_map: dict[str, list[int]],
-    metadata_tags_by_path: dict[str, list[str]],
-    global_tags: list[str],
+    metadata_by_root: dict[Path, DatasetMetadata],
     tag_id_map: dict[str, int],
 ) -> Iterable[IndexItem]:
     for dataset_root in dataset_roots:
+        dataset_metadata = metadata_by_root[dataset_root.resolve()]
         for image_path in dataset_root.rglob("*"):
             if not image_path.is_file() or image_path.suffix.lower() not in IMAGE_EXTENSIONS:
                 continue
@@ -163,7 +236,7 @@ def iter_page_items(
             payload = {
                 "manga_id": manga_id,
                 "pack_id": pack_id,
-                "keyword_ids": build_keyword_ids(path_str, keyword_map, metadata_tags_by_path, global_tags, tag_id_map),
+                "keyword_ids": build_keyword_ids(dataset_metadata.tags, tag_id_map, path_str),
                 "cover_thumb_path": "",
                 "page_no": page_no,
                 "page_path": path_str,
@@ -176,14 +249,14 @@ def iter_page_items(
                 point_id=make_point_id("page", image_path),
                 image_path=image_path,
                 payload=payload,
+                pack_title=dataset_metadata.title,
             )
 
 
 def iter_crop_items(
     crop_manifest_path: Path,
-    keyword_map: dict[str, list[int]],
-    metadata_tags_by_path: dict[str, list[str]],
-    global_tags: list[str],
+    dataset_roots: list[Path],
+    metadata_by_root: dict[Path, DatasetMetadata],
     tag_id_map: dict[str, int],
 ) -> Iterable[IndexItem]:
     if not crop_manifest_path.exists():
@@ -196,12 +269,13 @@ def iter_crop_items(
             crop_image_path = Path(row["crop_image_path"]).resolve()
             original_image_path = Path(row["original_image_path"]).resolve()
             original_path_str = str(original_image_path)
+            dataset_root = find_dataset_root(original_image_path, dataset_roots)
+            dataset_metadata = metadata_by_root.get(dataset_root.resolve()) if dataset_root is not None else None
+            metadata_tags = dataset_metadata.tags if dataset_metadata is not None else []
             payload = {
                 "manga_id": parse_int_from_tokens(original_path_str, "manga"),
                 "pack_id": parse_int_from_tokens(original_path_str, "pack"),
-                "keyword_ids": build_keyword_ids(
-                    original_path_str, keyword_map, metadata_tags_by_path, global_tags, tag_id_map
-                ),
+                "keyword_ids": build_keyword_ids(metadata_tags, tag_id_map, original_path_str),
                 "cover_thumb_path": "",
                 "page_no": parse_page_no(original_path_str),
                 "page_path": original_path_str,
@@ -214,24 +288,8 @@ def iter_crop_items(
                 point_id=make_point_id("face_crop", crop_image_path, extra=str(tuple(row.get("bbox", [])))),
                 image_path=crop_image_path,
                 payload=payload,
+                pack_title=dataset_metadata.title if dataset_metadata is not None else None,
             )
-
-
-def load_keyword_map(path: Path | None) -> dict[str, list[int]]:
-    if path is None:
-        return {}
-    if not path.exists():
-        raise FileNotFoundError(f"keyword map file not found: {path}")
-    with path.open("r", encoding="utf-8") as fp:
-        data = json.load(fp)
-    if not isinstance(data, dict):
-        raise ValueError("keyword map must be a JSON object: {\"/abs/path.jpg\": [1,2]}")
-    normalized: dict[str, list[int]] = {}
-    for key, value in data.items():
-        if not isinstance(value, list):
-            continue
-        normalized[str(Path(key).resolve())] = [int(v) for v in value]
-    return normalized
 
 
 def upsert_db_records(
@@ -241,6 +299,7 @@ def upsert_db_records(
 ) -> None:
     manga_ids: set[int] = set()
     pack_manga: dict[int, int] = {}
+    pack_titles: dict[int, str] = {}
     pack_keywords: set[tuple[int, int]] = set()
 
     for item in items:
@@ -251,6 +310,8 @@ def upsert_db_records(
             manga_ids.add(int(manga_id))
         if manga_id is not None and pack_id is not None:
             pack_manga.setdefault(int(pack_id), int(manga_id))
+        if pack_id is not None and item.pack_title:
+            pack_titles.setdefault(int(pack_id), item.pack_title)
         if pack_id is not None:
             for keyword_id in payload.get("keyword_ids") or []:
                 pack_keywords.add((int(pack_id), int(keyword_id)))
@@ -261,8 +322,12 @@ def upsert_db_records(
     session.flush()
 
     for pack_id, manga_id in sorted(pack_manga.items()):
-        if session.get(Pack, pack_id) is None:
-            session.add(Pack(pack_id=pack_id, manga_id=manga_id, cover_thumb_path=None, title=None))
+        pack = session.get(Pack, pack_id)
+        pack_title = pack_titles.get(pack_id)
+        if pack is None:
+            session.add(Pack(pack_id=pack_id, manga_id=manga_id, cover_thumb_path=None, title=pack_title))
+        elif pack_title and pack.title != pack_title:
+            pack.title = pack_title
     session.flush()
 
     keyword_ids = {keyword_id for _, keyword_id in pack_keywords}
@@ -270,6 +335,18 @@ def upsert_db_records(
         if session.get(Keyword, keyword_id) is None:
             keyword_name = keyword_names_by_id.get(keyword_id, f"keyword_{keyword_id}")
             session.add(Keyword(id=keyword_id, name=keyword_name))
+    session.flush()
+
+    for keyword_id in sorted(keyword_ids):
+        tag_name = keyword_names_by_id.get(keyword_id)
+        if not tag_name:
+            continue
+        normalized_tag = tag_name.lower()
+        tag_row = session.get(TagIdMap, normalized_tag)
+        if tag_row is None:
+            session.add(TagIdMap(tag=normalized_tag, keyword_id=keyword_id))
+        elif int(tag_row.keyword_id) != int(keyword_id):
+            tag_row.keyword_id = int(keyword_id)
     session.flush()
 
     for pack_id, keyword_id in sorted(pack_keywords):
@@ -309,43 +386,42 @@ def embed_batch(embedder: OnnxImageEmbedder, batch: list[IndexItem]) -> list[lis
 
 
 def run_indexing(args: argparse.Namespace) -> None:
-    dataset_roots = [Path(root).resolve() for root in args.datasets_root]
-    keyword_map = load_keyword_map(Path(args.keyword_map).resolve() if args.keyword_map else None)
-    tag_id_map = load_tag_id_map(Path(args.tag_id_map).resolve() if args.tag_id_map else None)
-    metadata_tags_by_path, global_tags = load_dataset_metadata(
-        Path(args.dataset_metadata).resolve() if args.dataset_metadata else None,
-        dataset_roots,
-    )
-    keyword_names_by_id = {int(keyword_id): tag for tag, keyword_id in tag_id_map.items()}
+    dataset_roots = discover_dataset_roots(args.datasets_root)
+    input_tag_id_map = load_tag_id_map(Path(args.tag_id_map).resolve() if args.tag_id_map else None)
+    metadata_by_root = load_dataset_metadata(dataset_roots)
     state_path = Path(args.resume_state).resolve()
     processed_ids = set() if args.reset_state else load_state(state_path)
-
-    all_items: list[IndexItem] = []
-    for item in iter_page_items(dataset_roots, keyword_map, metadata_tags_by_path, global_tags, tag_id_map):
-        if item.point_id in processed_ids or not item.image_path.exists():
-            continue
-        all_items.append(item)
-    if args.face_crops_manifest:
-        for item in iter_crop_items(
-            Path(args.face_crops_manifest).resolve(),
-            keyword_map,
-            metadata_tags_by_path,
-            global_tags,
-            tag_id_map,
-        ):
-            if item.point_id in processed_ids or not item.image_path.exists():
-                continue
-            all_items.append(item)
-
-    if not all_items:
-        print(json.dumps({"status": "noop", "reason": "no new items to index"}, ensure_ascii=False))
-        return
 
     db_url = args.db_url or os.getenv("DATABASE_URL", "sqlite:///./comicsearch.db")
     engine = create_engine(db_url)
     Base.metadata.create_all(bind=engine)
     DbSession = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, class_=Session)
+
+    all_items: list[IndexItem] = []
     with DbSession() as db:
+        db_tag_to_id, db_id_to_tag = load_db_tag_id_map(db)
+        tag_id_map, keyword_names_by_id = resolve_effective_tag_maps(input_tag_id_map, db_tag_to_id, db_id_to_tag)
+
+        for item in iter_page_items(dataset_roots, metadata_by_root, tag_id_map):
+            if item.point_id in processed_ids or not item.image_path.exists():
+                continue
+            all_items.append(item)
+        if args.face_crops_manifest:
+            for item in iter_crop_items(
+                Path(args.face_crops_manifest).resolve(),
+                dataset_roots,
+                metadata_by_root,
+                tag_id_map,
+            ):
+                if item.point_id in processed_ids or not item.image_path.exists():
+                    continue
+                all_items.append(item)
+
+        if not all_items:
+            print(json.dumps({"status": "noop", "reason": "no new items to index"}, ensure_ascii=False))
+            return
+
+        validate_used_keyword_ids(all_items, keyword_names_by_id)
         upsert_db_records(db, all_items, keyword_names_by_id)
 
     embedder = OnnxImageEmbedder(
@@ -411,19 +487,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--reset-state", action="store_true", help="Ignore previous state and re-index all items.")
     parser.add_argument(
-        "--keyword-map",
-        default=None,
-        help="Optional JSON map of absolute page path to keyword id list.",
-    )
-    parser.add_argument(
-        "--dataset-metadata",
-        default=None,
-        help='Optional metadata JSON. Supports {"tags": [...]} or {"<path>": {"tags": [...]}}.',
-    )
-    parser.add_argument(
         "--tag-id-map",
         default=None,
-        help='Optional tag-to-id JSON map: {"tag": id}. Used with --dataset-metadata tags.',
+        help='Optional tag-to-id JSON map: {"tag": id}. Used with per-root metadata tags.',
     )
     parser.add_argument(
         "--db-url",

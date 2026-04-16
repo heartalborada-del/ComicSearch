@@ -1,7 +1,7 @@
 # ComicSearch（中文说明）
 
 基于 FastAPI 的漫画/图像检索后端，包含：
-- SQLAlchemy ORM（`manga`、`pack`、`keyword`、`pack_keyword`）
+- SQLAlchemy ORM（`manga`、`pack`、`keyword`、`pack_keyword`、`tag_id_map`）
 - ONNXRuntime 图像向量（优先 CPU，CLIP 风格预处理）
 - Qdrant 向量检索（支持关键词 AND 过滤与漫画级聚合排序）
 
@@ -100,6 +100,10 @@ Manifest（JSONL）字段：
 - `bbox`（`[x1,y1,x2,y2]`）
 - `score`
 
+说明：
+- `build_face_crops.py` 支持对 `--input-root` 下的一级图包目录逐个递归处理。
+- 裁剪图会保持原有目录结构（相对于 `--input-root` 的路径层级不变）。
+
 ## 将全部数据集索引到 Qdrant + SQL DB
 
 索引全量页面和可选人脸裁剪子集：
@@ -122,14 +126,29 @@ Payload 包含：
 - 裁剪图相关元数据（如有）：`crop_bbox`、`crop_score`、`crop_original_path`
 
 可选参数：
-- `--keyword-map /abs/path/keyword_map.json`，格式：`{"<abs page path>": [1,2]}`
-- `--dataset-metadata /abs/path/metadata.json`，格式支持：
-  - 全局标签：`{"tags": ["tagA", "tagB"]}`
-  - 页面级标签：`{"<abs or relative page path>": {"tags": ["tagA"]}}`
 - `--tag-id-map /abs/path/tag_id_map.json`，格式：`{"tagA": 1, "tagB": 2}`
-  - metadata 中的标签会通过该映射转为 `keyword_ids`
+  - metadata 中的标签会通过该映射转为 `keyword_ids`（标签匹配忽略大小写）
+  - 若 `tag-id-map` 缺失某个标签，会尝试使用数据库 `tag_id_map` 中的映射；若 map 与数据库都缺失则报错终止
+  - 若 map 出现重复 id 且与数据库映射冲突，则使用数据库映射；若数据库无该 id 映射则报错终止
 - `--db-url sqlite:///./comicsearch.db`（或任意 SQLAlchemy URL）用于常规 DB 索引（`manga/pack/keyword/pack_keyword`）
 - `--reset-state` 从头重新索引
+
+每个图集根目录都需要放一个 `metadata.json`，格式如下：
+
+```json
+{
+  "title": "图包名称",
+  "tags": ["tagA", "tagB"]
+}
+```
+
+其中：
+- `title` 会写入数据库 `pack.title`
+- `tags` 会通过 `--tag-id-map` 映射为 `keyword_ids`
+
+目录扫描规则：
+- `index_all_datasets.py` 对每个 `--datasets-root` 会先检查自身是否是图包根目录（存在 `metadata.json`）。
+- 同时支持自动发现该目录下一级子目录中的图包根目录（子目录内存在 `metadata.json`）。
 
 ## ORM 与数据库
 

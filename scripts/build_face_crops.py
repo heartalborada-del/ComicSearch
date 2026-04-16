@@ -26,6 +26,13 @@ def iter_image_paths(root: Path) -> Iterable[Path]:
             yield path
 
 
+def discover_pack_roots(input_root: Path) -> list[Path]:
+    first_level_dirs = [path for path in sorted(input_root.iterdir()) if path.is_dir()]
+    if not first_level_dirs:
+        return [input_root]
+    return first_level_dirs
+
+
 def expand_bbox(
     bbox: tuple[int, int, int, int],
     image_shape: tuple[int, int],
@@ -99,6 +106,10 @@ def parse_yolo_classes(raw: str | None) -> list[int] | None:
 
 def build_face_crops(args: argparse.Namespace) -> None:
     input_root = Path(args.input_root).resolve()
+    if not input_root.exists() or not input_root.is_dir():
+        raise FileNotFoundError(f"input root not found: {input_root}")
+
+    pack_roots = discover_pack_roots(input_root)
     output_crop_root = Path(args.output_crop_root).resolve()
     output_manifest = Path(args.output_manifest).resolve()
     output_crop_root.mkdir(parents=True, exist_ok=True)
@@ -116,50 +127,52 @@ def build_face_crops(args: argparse.Namespace) -> None:
     scanned = 0
     bbox_expand_ratio = float(args.bbox_expand_ratio)
     with output_manifest.open("w", encoding="utf-8") as manifest_fp:
-        for image_path in iter_image_paths(input_root):
-            scanned += 1
-            image = cv2.imread(str(image_path))
-            if image is None:
-                continue
-            detections = detect_faces(
-                image=image,
-                detector=detector,
-                confidence_threshold=float(args.confidence_threshold),
-                max_detections_per_image=int(args.max_detections_per_image),
-                class_ids=class_ids,
-            )
-            if not detections:
-                continue
-
-            relative = image_path.relative_to(input_root)
-            stem = relative.with_suffix("")
-            for index, detection in enumerate(detections):
-                expanded = expand_bbox(detection.bbox, image.shape[:2], bbox_expand_ratio)
-                x1, y1, x2, y2 = expanded
-                if min(x2 - x1, y2 - y1) < int(args.min_crop_size):
+        for pack_root in pack_roots:
+            for image_path in iter_image_paths(pack_root):
+                scanned += 1
+                image = cv2.imread(str(image_path))
+                if image is None:
                     continue
-                crop = image[y1:y2, x1:x2]
-                if crop.size == 0:
-                    continue
-
-                crop_path = output_crop_root / stem.parent / f"{stem.name}_face_crop_{index:02d}.jpg"
-                crop_path.parent.mkdir(parents=True, exist_ok=True)
-                if not cv2.imwrite(str(crop_path), crop):
-                    continue
-
-                manifest_fp.write(
-                    json.dumps(
-                        {
-                            "original_image_path": str(image_path),
-                            "crop_image_path": str(crop_path),
-                            "bbox": [x1, y1, x2, y2],
-                            "score": round(detection.score, 6),
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
+                detections = detect_faces(
+                    image=image,
+                    detector=detector,
+                    confidence_threshold=float(args.confidence_threshold),
+                    max_detections_per_image=int(args.max_detections_per_image),
+                    class_ids=class_ids,
                 )
-                written += 1
+                if not detections:
+                    continue
+
+                # Keep crop output aligned with the original directory hierarchy under input_root.
+                relative = image_path.relative_to(input_root)
+                stem = relative.with_suffix("")
+                for index, detection in enumerate(detections):
+                    expanded = expand_bbox(detection.bbox, image.shape[:2], bbox_expand_ratio)
+                    x1, y1, x2, y2 = expanded
+                    if min(x2 - x1, y2 - y1) < int(args.min_crop_size):
+                        continue
+                    crop = image[y1:y2, x1:x2]
+                    if crop.size == 0:
+                        continue
+
+                    crop_path = output_crop_root / stem.parent / f"{stem.name}_face_crop_{index:02d}.jpg"
+                    crop_path.parent.mkdir(parents=True, exist_ok=True)
+                    if not cv2.imwrite(str(crop_path), crop):
+                        continue
+
+                    manifest_fp.write(
+                        json.dumps(
+                            {
+                                "original_image_path": str(image_path),
+                                "crop_image_path": str(crop_path),
+                                "bbox": [x1, y1, x2, y2],
+                                "score": round(detection.score, 6),
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+                    written += 1
 
     print(
         json.dumps(
