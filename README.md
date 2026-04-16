@@ -99,7 +99,7 @@ Manifest JSONL fields:
 - `bbox` (`[x1,y1,x2,y2]`)
 - `score`
 
-## Index all datasets into Qdrant
+## Index all datasets into Qdrant + SQL DB
 
 Index full pages and optional face-crop subset:
 
@@ -122,6 +122,12 @@ Payload includes:
 
 Optional config:
 - `--keyword-map /abs/path/keyword_map.json` where JSON format is `{"<abs page path>": [1,2]}`
+- `--dataset-metadata /abs/path/metadata.json` where format supports:
+  - global tags: `{"tags": ["tagA", "tagB"]}`
+  - per-page tags: `{"<abs or relative page path>": {"tags": ["tagA"]}}`
+- `--tag-id-map /abs/path/tag_id_map.json` where format is `{"tagA": 1, "tagB": 2}`
+  - tags from metadata are mapped to `keyword_ids` using this map
+- `--db-url sqlite:///./comicsearch.db` (or any SQLAlchemy URL) for normal DB indexing (`manga/pack/keyword/pack_keyword`)
 - `--reset-state` to re-index everything from scratch
 
 ## ORM and DB
