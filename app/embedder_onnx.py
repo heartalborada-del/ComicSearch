@@ -7,6 +7,7 @@ from PIL import Image, ImageEnhance
 
 class OnnxImageEmbedder:
     """ONNXRuntime-backed image embedder with CLIP-style preprocessing."""
+    # Multi-view defaults tuned for partial-panel robustness with modest CPU overhead.
     CENTER_CROP_RATIO = 0.85
     CORNER_CROP_RATIO = 0.75
     CONTRAST_FACTOR = 1.15

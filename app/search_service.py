@@ -9,6 +9,7 @@ from qdrant_client.http import models as qm
 
 class SearchService:
     """Qdrant vector search and manga-first aggregation service."""
+    # Log hit-count bonus weight used when scoring aggregated manga candidates.
     HITS_BONUS_WEIGHT = 0.03
 
     def __init__(self, qdrant_client: Any, collection_name: str = "pages") -> None:
