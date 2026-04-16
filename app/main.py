@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -30,32 +31,34 @@ def parse_keyword_ids(raw_keyword_ids: str | None) -> list[int]:
 
 
 def create_app(embedder: Any | None = None, search_service: Any | None = None) -> FastAPI:
-    app = FastAPI(title="ComicSearch API")
     runtime = _AppRuntime()
     runtime.embedder = embedder
     runtime.search_service = search_service
-    app.state.runtime = runtime
 
-    @app.on_event("startup")
-    def _startup() -> None:
-        if app.state.runtime.embedder is None:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        if runtime.embedder is None:
             model_path = os.getenv("ONNX_MODEL_PATH", "models/clip_image_encoder.onnx")
             input_size = int(os.getenv("EMBEDDER_INPUT_SIZE", "224"))
             intra_threads = int(os.getenv("EMBEDDER_INTRA_THREADS", "4"))
-            app.state.runtime.embedder = OnnxImageEmbedder(
+            runtime.embedder = OnnxImageEmbedder(
                 onnx_path=model_path,
                 input_size=input_size,
                 intra_threads=intra_threads,
             )
 
-        if app.state.runtime.search_service is None:
+        if runtime.search_service is None:
             from qdrant_client import QdrantClient
 
             qdrant_host = os.getenv("QDRANT_HOST", "127.0.0.1")
             qdrant_port = int(os.getenv("QDRANT_PORT", "6333"))
             collection_name = os.getenv("QDRANT_COLLECTION", "pages")
             qdrant = QdrantClient(host=qdrant_host, port=qdrant_port)
-            app.state.runtime.search_service = SearchService(qdrant, collection_name=collection_name)
+            runtime.search_service = SearchService(qdrant, collection_name=collection_name)
+        yield
+
+    app = FastAPI(title="ComicSearch API", lifespan=lifespan)
+    app.state.runtime = runtime
 
     @app.post("/search")
     async def search(
@@ -75,7 +78,10 @@ def create_app(embedder: Any | None = None, search_service: Any | None = None) -
         try:
             parsed_keyword_ids = parse_keyword_ids(keyword_ids)
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
-            raise HTTPException(status_code=400, detail="keyword_ids must be int array JSON or comma-separated ints") from exc
+            raise HTTPException(
+                status_code=400,
+                detail=f"invalid keyword_ids '{keyword_ids}': expected int array JSON or comma-separated ints ({exc})",
+            ) from exc
 
         if robust_partial:
             vectors = app.state.runtime.embedder.multi_views(

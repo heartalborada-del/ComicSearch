@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 import numpy as np
 from PIL import Image, ImageEnhance
 
@@ -17,6 +18,8 @@ class OnnxImageEmbedder:
             import onnxruntime as ort
         except ImportError as exc:  # pragma: no cover - runtime dependency check
             raise RuntimeError("onnxruntime is required to use OnnxImageEmbedder") from exc
+        if not Path(onnx_path).is_file():
+            raise FileNotFoundError(f"ONNX model not found: {onnx_path}")
 
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = max(1, int(intra_threads))

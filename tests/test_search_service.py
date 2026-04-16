@@ -27,7 +27,8 @@ class SearchServiceTests(unittest.TestCase):
             def __init__(self):
                 self.calls = 0
 
-            def search(self, **_kwargs):
+            def search(self, **kwargs):
+                _ = kwargs
                 self.calls += 1
                 if self.calls == 1:
                     return [

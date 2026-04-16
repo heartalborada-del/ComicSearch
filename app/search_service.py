@@ -4,6 +4,7 @@ from collections import defaultdict
 from math import log
 from typing import Any
 
+import numpy as np
 from qdrant_client.http import models as qm
 
 
@@ -33,7 +34,7 @@ class SearchService:
         best_by_point_id: dict[Any, Any] = {}
 
         for vector in vectors:
-            vector_value = vector.tolist() if hasattr(vector, "tolist") else vector
+            vector_value = vector.tolist() if isinstance(vector, np.ndarray) else vector
             points = self.qdrant.search(
                 collection_name=self.collection_name,
                 query_vector=vector_value,
