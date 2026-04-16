@@ -35,7 +35,7 @@ def parse_keyword_ids(raw_keyword_ids: str | None) -> list[int]:
 
     keyword_ids: list[int] = []
     for item in parsed:
-        if isinstance(item, bool) or not isinstance(item, int):
+        if type(item) is not int:
             raise ValueError("keyword_ids entries must be integers")
         if item <= 0 or item > INT32_MAX:
             raise ValueError("keyword_ids entries must be positive int32 values")

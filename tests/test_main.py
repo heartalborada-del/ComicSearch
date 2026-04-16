@@ -11,7 +11,7 @@ class ParseKeywordIdsTests(unittest.TestCase):
     def test_parse_json_array(self):
         self.assertEqual(parse_keyword_ids("[1,2,3]"), [1, 2, 3])
 
-    def test_parse_reject_non_json_format(self):
+    def test_parse_rejects_comma_separated_format(self):
         with self.assertRaises(json.JSONDecodeError):
             parse_keyword_ids("1,2,3")
 

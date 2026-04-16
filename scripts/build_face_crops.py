@@ -51,29 +51,17 @@ def detect_faces(
     max_detections_per_image: int,
 ) -> list[Detection]:
     detections: list[Detection] = []
-    if hasattr(detector, "detectMultiScale3"):
-        rects, _, level_weights = detector.detectMultiScale3(
-            gray_image,
-            scaleFactor=1.1,
-            minNeighbors=3,
-            outputRejectLevels=True,
-        )
-        for (x, y, w, h), score in zip(rects, level_weights):
-            score_value = float(score)
-            if score_value < confidence_threshold:
-                continue
-            detections.append(Detection((int(x), int(y), int(x + w), int(y + h)), score_value))
-    else:
-        rects = detector.detectMultiScale(
-            gray_image,
-            scaleFactor=1.1,
-            minNeighbors=3,
-            minSize=(24, 24),
-        )
-        detections.extend(
-            Detection((int(x), int(y), int(x + w), int(y + h)), 1.0)
-            for (x, y, w, h) in rects
-        )
+    rects, _, level_weights = detector.detectMultiScale3(
+        gray_image,
+        scaleFactor=1.1,
+        minNeighbors=3,
+        outputRejectLevels=True,
+    )
+    for (x, y, w, h), score in zip(rects, level_weights):
+        score_value = float(score)
+        if score_value < confidence_threshold:
+            continue
+        detections.append(Detection((int(x), int(y), int(x + w), int(y + h)), score_value))
 
     detections.sort(key=lambda detection: detection.score, reverse=True)
     return detections[:max_detections_per_image]
@@ -86,7 +74,11 @@ def build_face_crops(args: argparse.Namespace) -> None:
     output_crop_root.mkdir(parents=True, exist_ok=True)
     output_manifest.parent.mkdir(parents=True, exist_ok=True)
 
-    cascade_path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
+    cascade_path = (
+        Path(args.cascade_model).resolve()
+        if args.cascade_model
+        else Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
+    )
     detector = cv2.CascadeClassifier(str(cascade_path))
     if detector.empty():
         raise RuntimeError(f"failed to load haarcascade detector: {cascade_path}")
@@ -120,7 +112,7 @@ def build_face_crops(args: argparse.Namespace) -> None:
                 if crop.size == 0:
                     continue
 
-                crop_path = output_crop_root / f"{stem.as_posix()}__face_{index:02d}.jpg"
+                crop_path = output_crop_root / stem.parent / f"{stem.name}_face_crop_{index:02d}.jpg"
                 crop_path.parent.mkdir(parents=True, exist_ok=True)
                 if not cv2.imwrite(str(crop_path), crop):
                     continue
@@ -131,7 +123,7 @@ def build_face_crops(args: argparse.Namespace) -> None:
                             "original_image_path": str(image_path),
                             "crop_image_path": str(crop_path),
                             "bbox": [x1, y1, x2, y2],
-                            "score": round(float(detection.score), 6),
+                            "score": round(detection.score, 6),
                         },
                         ensure_ascii=False,
                     )
@@ -171,6 +163,11 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.15,
         help="Bounding box expansion ratio before cropping.",
+    )
+    parser.add_argument(
+        "--cascade-model",
+        default=None,
+        help="Optional Haar cascade XML path. Defaults to OpenCV frontal face cascade.",
     )
     return parser.parse_args()
 

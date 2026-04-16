@@ -89,7 +89,8 @@ python scripts/build_face_crops.py \
   --confidence-threshold 0.35 \
   --min-crop-size 48 \
   --max-detections-per-image 6 \
-  --bbox-expand-ratio 0.15
+  --bbox-expand-ratio 0.15 \
+  --cascade-model /path/to/haarcascade_frontalface_default.xml
 ```
 
 Manifest JSONL fields:

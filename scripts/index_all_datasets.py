@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import sys
+from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -21,6 +22,7 @@ from app.embedder_onnx import OnnxImageEmbedder
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+PAGE_PATTERN = re.compile(r"(?:page|p)[_-]?(\d+)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -30,8 +32,13 @@ class IndexItem:
     payload: dict[str, Any]
 
 
+@lru_cache(maxsize=16)
+def token_id_pattern(token: str) -> re.Pattern[str]:
+    return re.compile(rf"{re.escape(token)}[_-]?(\d+)", re.IGNORECASE)
+
+
 def parse_int_from_tokens(path_value: str, token: str) -> int | None:
-    match = re.search(rf"{re.escape(token)}[_-]?(\d+)", path_value, re.IGNORECASE)
+    match = token_id_pattern(token).search(path_value)
     if match:
         return int(match.group(1))
     numeric_matches = re.findall(r"\d+", path_value)
@@ -39,7 +46,7 @@ def parse_int_from_tokens(path_value: str, token: str) -> int | None:
 
 
 def parse_page_no(path_value: str) -> int | None:
-    page_match = re.search(r"(?:page|p)[_-]?(\d+)", path_value, re.IGNORECASE)
+    page_match = PAGE_PATTERN.search(path_value)
     if page_match:
         return int(page_match.group(1))
     stem_matches = re.findall(r"\d+", Path(path_value).stem)
@@ -47,7 +54,8 @@ def parse_page_no(path_value: str) -> int | None:
 
 
 def make_point_id(source_type: str, image_path: Path, extra: str = "") -> str:
-    digest = hashlib.sha1(f"{source_type}:{image_path}:{extra}".encode("utf-8")).hexdigest()
+    resolved_path = image_path.resolve()
+    digest = hashlib.sha256(f"{source_type}:{resolved_path}:{extra}".encode("utf-8")).hexdigest()
     return digest
 
 
@@ -103,7 +111,7 @@ def iter_crop_items(crop_manifest_path: Path, keyword_map: dict[str, list[int]])
                 "crop_original_path": original_path_str,
             }
             yield IndexItem(
-                point_id=make_point_id("face_crop", crop_image_path, extra=json.dumps(row.get("bbox"))),
+                point_id=make_point_id("face_crop", crop_image_path, extra=str(tuple(row.get("bbox", [])))),
                 image_path=crop_image_path,
                 payload=payload,
             )
@@ -162,10 +170,15 @@ def run_indexing(args: argparse.Namespace) -> None:
     processed_ids = set() if args.reset_state else load_state(state_path)
 
     all_items: list[IndexItem] = []
-    all_items.extend(iter_page_items(dataset_roots, keyword_map))
+    for item in iter_page_items(dataset_roots, keyword_map):
+        if item.point_id in processed_ids or not item.image_path.exists():
+            continue
+        all_items.append(item)
     if args.face_crops_manifest:
-        all_items.extend(iter_crop_items(Path(args.face_crops_manifest).resolve(), keyword_map))
-    all_items = [item for item in all_items if item.point_id not in processed_ids and item.image_path.exists()]
+        for item in iter_crop_items(Path(args.face_crops_manifest).resolve(), keyword_map):
+            if item.point_id in processed_ids or not item.image_path.exists():
+                continue
+            all_items.append(item)
 
     if not all_items:
         print(json.dumps({"status": "noop", "reason": "no new items to index"}, ensure_ascii=False))
@@ -186,8 +199,8 @@ def run_indexing(args: argparse.Namespace) -> None:
             for item, vector in zip(embed_batch_items, vectors)
         ]
 
-        for upsert_items in batch_iter(points, int(args.upsert_batch_size)):
-            client.upsert(collection_name=args.collection, points=upsert_items, wait=True)
+        for qdrant_point_batch in batch_iter(points, int(args.upsert_batch_size)):
+            client.upsert(collection_name=args.collection, points=qdrant_point_batch, wait=True)
 
         for item in embed_batch_items:
             processed_ids.add(item.point_id)
