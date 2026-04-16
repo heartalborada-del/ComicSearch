@@ -88,11 +88,12 @@ python scripts/build_face_crops.py \
   --input-root /data/manga_pages \
   --output-crop-root /data/face_crops \
   --output-manifest /data/face_crops/manifest.jsonl \
+  --yolo-model /path/to/yolo_model.pt \
+  --yolo-classes 0 \
   --confidence-threshold 0.35 \
   --min-crop-size 48 \
   --max-detections-per-image 6 \
-  --bbox-expand-ratio 0.15 \
-  --cascade-model /path/to/haarcascade_frontalface_default.xml
+  --bbox-expand-ratio 0.15
 ```
 
 Manifest JSONL fields:
