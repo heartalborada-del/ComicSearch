@@ -4,6 +4,11 @@ from collections import defaultdict
 from math import log
 from typing import Any
 
+try:
+    from qdrant_client.http import models as qm
+except Exception:  # pragma: no cover - fallback when qdrant client is not installed
+    qm = None
+
 
 class SearchService:
     """Qdrant vector search and manga-first aggregation service."""
@@ -15,15 +20,12 @@ class SearchService:
     def _and_keyword_filter(self, keyword_ids: list[int] | None):
         if not keyword_ids:
             return None
-        try:
-            from qdrant_client.http import models as qm
-
+        if qm is not None:
             return qm.Filter(
                 must=[qm.FieldCondition(key="keyword_ids", match=qm.MatchValue(value=int(keyword_id))) for keyword_id in keyword_ids]
             )
-        except Exception:
-            # Fallback dict keeps behavior testable without qdrant imports.
-            return {"must": [{"key": "keyword_ids", "match": {"value": int(keyword_id)}} for keyword_id in keyword_ids]}
+        # Fallback dict keeps behavior testable without qdrant imports.
+        return {"must": [{"key": "keyword_ids", "match": {"value": int(keyword_id)}} for keyword_id in keyword_ids]}
 
     def search_pages_multi_view(
         self,

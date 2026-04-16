@@ -74,8 +74,8 @@ Vectors should be L2-normalized embeddings from the same ONNX model used at quer
 
 ## ORM and DB
 
-- Models are in `/home/runner/work/ComicSearch/ComicSearch/app/models.py`
-- DB session/init helpers are in `/home/runner/work/ComicSearch/ComicSearch/app/db.py`
+- Models are in `app/models.py`
+- DB session/init helpers are in `app/db.py`
 - Initialize tables:
 
 ```python

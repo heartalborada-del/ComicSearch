@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import io
-from typing import Iterable
-
 import numpy as np
 from PIL import Image, ImageEnhance
 
@@ -95,13 +93,3 @@ class OnnxImageEmbedder:
                 views.append(ImageEnhance.Contrast(image).enhance(1.15))
 
             return [self.embed_pil(v) for v in views]
-
-
-def max_merge_scores(results: Iterable[object]) -> dict[object, float]:
-    merged: dict[object, float] = {}
-    for point in results:
-        point_id = getattr(point, "id")
-        score = float(getattr(point, "score", 0.0))
-        if point_id not in merged or score > merged[point_id]:
-            merged[point_id] = score
-    return merged
