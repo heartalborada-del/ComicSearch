@@ -53,11 +53,10 @@ def detect_faces(
     class_ids: list[int] | None,
 ) -> list[Detection]:
     detections: list[Detection] = []
-    classes = class_ids if class_ids else None
     results = detector.predict(
         source=image,
         conf=confidence_threshold,
-        classes=classes,
+        classes=class_ids,
         verbose=False,
     )
     if not results:
@@ -74,7 +73,9 @@ def detect_faces(
         x1, y1, x2, y2 = (int(max(0, round(value))) for value in coords)
         if x2 <= x1 or y2 <= y1:
             continue
-        score_value = float(box.conf[0].item()) if box.conf is not None else 0.0
+        if box.conf is None or int(box.conf.numel()) == 0:
+            continue
+        score_value = float(box.conf[0].item())
         detections.append(Detection((x1, y1, x2, y2), score_value))
 
     detections.sort(key=lambda detection: detection.score, reverse=True)
@@ -89,7 +90,10 @@ def parse_yolo_classes(raw: str | None) -> list[int] | None:
         token = token.strip()
         if token == "":
             continue
-        values.append(int(token))
+        try:
+            values.append(int(token))
+        except ValueError as exc:
+            raise ValueError(f"invalid --yolo-classes value '{token}': expected integers like '0,1'") from exc
     return values if values else None
 
 
@@ -102,12 +106,15 @@ def build_face_crops(args: argparse.Namespace) -> None:
 
     yolo_model_path = Path(args.yolo_model).resolve()
     if not yolo_model_path.exists():
-        raise FileNotFoundError(f"YOLO model file not found: {yolo_model_path}")
+        raise FileNotFoundError(
+            f"YOLO model file not found: {yolo_model_path} (expected a local .pt or .onnx model file)"
+        )
     detector = YOLO(str(yolo_model_path))
     class_ids = parse_yolo_classes(args.yolo_classes)
 
     written = 0
     scanned = 0
+    bbox_expand_ratio = float(args.bbox_expand_ratio)
     with output_manifest.open("w", encoding="utf-8") as manifest_fp:
         for image_path in iter_image_paths(input_root):
             scanned += 1
@@ -127,7 +134,7 @@ def build_face_crops(args: argparse.Namespace) -> None:
             relative = image_path.relative_to(input_root)
             stem = relative.with_suffix("")
             for index, detection in enumerate(detections):
-                expanded = expand_bbox(detection.bbox, image.shape[:2], float(args.bbox_expand_ratio))
+                expanded = expand_bbox(detection.bbox, image.shape[:2], bbox_expand_ratio)
                 x1, y1, x2, y2 = expanded
                 if min(x2 - x1, y2 - y1) < int(args.min_crop_size):
                     continue
