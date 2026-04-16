@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
+python-multipart
+qdrant-client
+onnxruntime
+pillow
+numpy

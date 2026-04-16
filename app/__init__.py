@@ -1,0 +1,1 @@
+"""ComicSearch backend application package."""
