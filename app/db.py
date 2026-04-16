@@ -9,7 +9,7 @@ from app.models import Base
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./comicsearch.db")
 
-engine = create_engine(DATABASE_URL, future=True)
+engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, class_=Session)
 
 
