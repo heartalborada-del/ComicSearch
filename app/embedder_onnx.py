@@ -7,6 +7,9 @@ from PIL import Image, ImageEnhance
 
 class OnnxImageEmbedder:
     """ONNXRuntime-backed image embedder with CLIP-style preprocessing."""
+    CENTER_CROP_RATIO = 0.85
+    CORNER_CROP_RATIO = 0.75
+    CONTRAST_FACTOR = 1.15
 
     def __init__(self, onnx_path: str, input_size: int = 224, intra_threads: int = 4):
         try:
@@ -73,13 +76,13 @@ class OnnxImageEmbedder:
 
             views: list[Image.Image] = [image.copy()]
 
-            center_side = max(1, int(side * 0.85))
+            center_side = max(1, int(side * self.CENTER_CROP_RATIO))
             cx = (width - center_side) // 2
             cy = (height - center_side) // 2
             views.append(image.crop((cx, cy, cx + center_side, cy + center_side)))
 
             if include_corners:
-                corner_side = max(1, int(side * 0.75))
+                corner_side = max(1, int(side * self.CORNER_CROP_RATIO))
                 views.extend(
                     [
                         image.crop((0, 0, corner_side, corner_side)),
@@ -90,6 +93,6 @@ class OnnxImageEmbedder:
                 )
 
             if include_contrast:
-                views.append(ImageEnhance.Contrast(image).enhance(1.15))
+                views.append(ImageEnhance.Contrast(image).enhance(self.CONTRAST_FACTOR))
 
             return [self.embed_pil(v) for v in views]

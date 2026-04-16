@@ -4,14 +4,12 @@ from collections import defaultdict
 from math import log
 from typing import Any
 
-try:
-    from qdrant_client.http import models as qm
-except Exception:  # pragma: no cover - fallback when qdrant client is not installed
-    qm = None
+from qdrant_client.http import models as qm
 
 
 class SearchService:
     """Qdrant vector search and manga-first aggregation service."""
+    HITS_BONUS_WEIGHT = 0.03
 
     def __init__(self, qdrant_client: Any, collection_name: str = "pages") -> None:
         self.qdrant = qdrant_client
@@ -20,12 +18,9 @@ class SearchService:
     def _and_keyword_filter(self, keyword_ids: list[int] | None):
         if not keyword_ids:
             return None
-        if qm is not None:
-            return qm.Filter(
-                must=[qm.FieldCondition(key="keyword_ids", match=qm.MatchValue(value=int(keyword_id))) for keyword_id in keyword_ids]
-            )
-        # Fallback dict keeps behavior testable without qdrant imports.
-        return {"must": [{"key": "keyword_ids", "match": {"value": int(keyword_id)}} for keyword_id in keyword_ids]}
+        return qm.Filter(
+            must=[qm.FieldCondition(key="keyword_ids", match=qm.MatchValue(value=int(keyword_id))) for keyword_id in keyword_ids]
+        )
 
     def search_pages_multi_view(
         self,
@@ -67,7 +62,7 @@ class SearchService:
             top_scores = [score for score, _ in items[:5]]
             avg_top = sum(top_scores) / len(top_scores)
             hits = len(items)
-            score = avg_top + 0.03 * log(1 + hits)
+            score = avg_top + self.HITS_BONUS_WEIGHT * log(1 + hits)
             ranked.append(
                 {
                     "manga_id": manga_id,
