@@ -5,6 +5,8 @@ FastAPI-based manga/comic image search backend with:
 - ONNXRuntime image embeddings (CPU-first, CLIP-style preprocessing)
 - Qdrant vector retrieval with AND keyword filtering and manga-level ranking
 
+中文说明请查看：[README.zh-CN.md](README.zh-CN.md)
+
 ## Requirements
 
 - Python 3.11+
