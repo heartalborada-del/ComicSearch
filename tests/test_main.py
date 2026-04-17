@@ -38,7 +38,7 @@ class SearchValidationTests(unittest.TestCase):
         search_service = SimpleNamespace(
             search_pages_multi_view=lambda vectors, keyword_ids, per_view_limit: [],
             aggregate_manga=lambda points, top_k: [],
-            aggregate_packs_for_manga=lambda points, manga_id, top_k: [],
+            aggregate_packs_for_manga=lambda points, pack_id, top_k: [],
             confidence=lambda candidates: "low",
         )
         app = create_app(embedder=embedder, search_service=search_service)

@@ -8,24 +8,12 @@ class Base(DeclarativeBase):
     """Base declarative class for ORM models."""
 
 
-class Manga(Base):
-    __tablename__ = "manga"
-
-    manga_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    title: Mapped[str] = mapped_column(String, nullable=False)
-
-    packs: Mapped[list[Pack]] = relationship(back_populates="manga", cascade="all, delete-orphan")
-
-
 class Pack(Base):
     __tablename__ = "pack"
 
     pack_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    manga_id: Mapped[int] = mapped_column(ForeignKey("manga.manga_id", ondelete="CASCADE"), nullable=False)
-    cover_thumb_path: Mapped[str | None] = mapped_column(String, nullable=True)
     title: Mapped[str | None] = mapped_column(String, nullable=True)
 
-    manga: Mapped[Manga] = relationship(back_populates="packs")
     keywords: Mapped[list[PackKeyword]] = relationship(back_populates="pack", cascade="all, delete-orphan")
 
 

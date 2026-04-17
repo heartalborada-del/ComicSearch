@@ -5,15 +5,20 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.models import Base, Keyword, Manga, Pack, PackKeyword, TagIdMap
+from app.models import Base, Keyword, Pack, PackKeyword, TagIdMap
 from scripts.index_all_datasets import (
     IndexItem,
     build_keyword_ids,
     discover_dataset_roots,
+    ensure_metadata_tags_mapped,
+    export_tag_id_map,
     load_dataset_metadata,
     load_tag_id_map,
+    normalize_tag,
+    parse_page_no,
     resolve_effective_tag_maps,
     upsert_db_records,
+    upsert_tag_registry,
     validate_used_keyword_ids,
 )
 
@@ -59,11 +64,15 @@ class TagMetadataTests(unittest.TestCase):
     def test_build_keyword_ids_case_insensitive(self):
         page = "/tmp/a.jpg"
         ids = build_keyword_ids(
-            metadata_tags=["Action", "RoMaNcE"],
-            tag_id_map={"action": 1, "romance": 2},
+            metadata_tags=["Artist: Yamadori Kodi", "female:sex toys"],
+            tag_id_map={"artist:yamadori_kodi": 1, "female:sex_toys": 2},
             context_path=page,
         )
         self.assertEqual(ids, [1, 2])
+
+    def test_normalize_tag_rules(self):
+        self.assertEqual(normalize_tag("  Artist: Yamadori Kodi  "), "artist:yamadori_kodi")
+        self.assertEqual(normalize_tag("female: sex toys"), "female:sex_toys")
 
     def test_build_keyword_ids_missing_tag_raises(self):
         with self.assertRaises(ValueError):
@@ -72,6 +81,29 @@ class TagMetadataTests(unittest.TestCase):
                 tag_id_map={"action": 1},
                 context_path="/tmp/a.jpg",
             )
+
+    def test_ensure_metadata_tags_mapped_auto_assigns_new_ids(self):
+        metadata_by_root = {
+            Path("/tmp/a"): type("Meta", (), {"tags": ["Action", "NewTag"]})(),
+            Path("/tmp/b"): type("Meta", (), {"tags": ["newtag", "Another"]})(),
+        }
+        tag_to_id = {"action": 5}
+        id_to_tag = {5: "action"}
+
+        added = ensure_metadata_tags_mapped(metadata_by_root, tag_to_id, id_to_tag)
+
+        self.assertEqual(added, 2)
+        self.assertEqual(tag_to_id["newtag"], 6)
+        self.assertEqual(tag_to_id["another"], 7)
+        self.assertEqual(id_to_tag[6], "newtag")
+        self.assertEqual(id_to_tag[7], "another")
+
+    def test_export_tag_id_map_orders_by_keyword_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tag_id_map.json"
+            export_tag_id_map(path, {"romance": 2, "action": 1})
+            loaded = load_tag_id_map(path)
+            self.assertEqual(list(loaded.items()), [("action", 1), ("romance", 2)])
 
 
 class DatasetDiscoveryTests(unittest.TestCase):
@@ -126,12 +158,11 @@ class DbUpsertTests(unittest.TestCase):
             IndexItem(
                 point_id="p1",
                 image_path=Path("/tmp/a.jpg"),
-                payload={"manga_id": 1, "pack_id": 10, "keyword_ids": [100, 101]},
+                payload={"pack_id": 10, "keyword_ids": [100, 101]},
                 pack_title="album one",
             )
         ]
         upsert_db_records(session, items, {100: "action", 101: "romance"})
-        self.assertIsNotNone(session.get(Manga, 1))
         self.assertEqual(session.get(Pack, 10).title, "album one")
         self.assertEqual(session.get(Keyword, 100).name, "action")
         self.assertEqual(session.get(TagIdMap, "action").keyword_id, 100)
@@ -147,6 +178,73 @@ class DbUpsertTests(unittest.TestCase):
         ]
         with self.assertRaises(ValueError):
             validate_used_keyword_ids(items, {100: "action"})
+
+    def test_upsert_tag_registry_creates_keyword_and_tag_map(self):
+        session = make_session()
+        upsert_tag_registry(session, {101: "new_tag"})
+        session.commit()
+
+        self.assertEqual(session.get(Keyword, 101).name, "new_tag")
+        tag_row = session.get(TagIdMap, "new_tag")
+        self.assertEqual(int(getattr(tag_row, "keyword_id")), 101)
+
+    def test_upsert_db_records_backfills_missing_pack_id_from_existing_title(self):
+        session = make_session()
+        session.add(Pack(pack_id=22, title="album one"))
+        session.commit()
+
+        items = [
+            IndexItem(
+                point_id="p1",
+                image_path=Path("/tmp/a.jpg"),
+                payload={"pack_id": None, "keyword_ids": [100]},
+                pack_title="album one",
+            )
+        ]
+
+        upsert_db_records(session, items, {100: "action"})
+
+        self.assertEqual(items[0].payload["pack_id"], 22)
+        self.assertIsNotNone(session.get(PackKeyword, {"pack_id": 22, "keyword_id": 100}))
+
+    def test_upsert_db_records_backfills_missing_pack_id_by_creating_pack(self):
+        session = make_session()
+        session.add(Pack(pack_id=10, title="existing"))
+        session.commit()
+
+        items = [
+            IndexItem(
+                point_id="p2",
+                image_path=Path("/tmp/b.jpg"),
+                payload={"pack_id": None, "keyword_ids": [101]},
+                pack_title="new album",
+            )
+        ]
+
+        upsert_db_records(session, items, {101: "romance"})
+
+        new_pack_id = items[0].payload["pack_id"]
+        self.assertIsInstance(new_pack_id, int)
+        self.assertEqual(session.get(Pack, int(new_pack_id)).title, "new album")
+        self.assertIsNotNone(session.get(PackKeyword, {"pack_id": int(new_pack_id), "keyword_id": 101}))
+
+
+class ParsePageNoTests(unittest.TestCase):
+    def test_parse_page_no_numeric_and_prefixed_numeric(self):
+        all_names = ["_010.webp", "_009.webp", "_001.webp", "_002.webp"]
+        self.assertEqual(parse_page_no("_001.webp", all_names), 1)
+        self.assertEqual(parse_page_no("_002.webp", all_names), 2)
+        self.assertEqual(parse_page_no("_009.webp", all_names), 3)
+        self.assertEqual(parse_page_no("_010.webp", all_names), 4)
+
+    def test_parse_page_no_alphabetic_fallback(self):
+        all_names = ["c.webp", "a.webp", "b.webp"]
+        self.assertEqual(parse_page_no("a.webp", all_names), 1)
+        self.assertEqual(parse_page_no("b.webp", all_names), 2)
+        self.assertEqual(parse_page_no("c.webp", all_names), 3)
+
+    def test_parse_page_no_target_not_in_list(self):
+        self.assertIsNone(parse_page_no("missing.webp", ["a.webp", "b.webp"]))
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # ComicSearch（中文说明）
 
 基于 FastAPI 的漫画/图像检索后端，包含：
-- SQLAlchemy ORM（`manga`、`pack`、`keyword`、`pack_keyword`、`tag_id_map`）
+- SQLAlchemy ORM（`pack`、`keyword`、`pack_keyword`、`tag_id_map`）
 - ONNXRuntime 图像向量（优先 CPU，CLIP 风格预处理）
 - Qdrant 向量检索（支持关键词 AND 过滤与漫画级聚合排序）
 
@@ -58,19 +58,15 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 ```json
 {
-  "best_manga": {"manga_id": 101, "score": 0.42, "hits": 4, "top1_score": 0.91},
+  "best_manga": {"pack_id": 101, "score": 0.42, "hits": 4, "top1_score": 0.91},
   "confidence": "high",
-  "candidate_manga": [],
-  "top_packs_in_best_manga": [
-    {"pack_id": 55, "score": 0.88, "hits": 3, "cover_thumb_path": "..."}
-  ]
+  "candidate_manga": []
 }
 ```
 
 ## 数据与索引要求
 
 Qdrant collection 的 payload 应包含：
-- `manga_id`（int）
 - `pack_id`（int）
 - `keyword_ids`（int 数组）
 - `cover_thumb_path`（string）
@@ -121,16 +117,16 @@ python scripts/index_all_datasets.py \
 ```
 
 Payload 包含：
-- `manga_id`、`pack_id`、`keyword_ids`、`cover_thumb_path`
+- `pack_id`、`keyword_ids`、`cover_thumb_path`
 - `page_no`、`page_path`、`source_type`
 - 裁剪图相关元数据（如有）：`crop_bbox`、`crop_score`、`crop_original_path`
 
 可选参数：
-- `--tag-id-map /abs/path/tag_id_map.json`，格式：`{"tagA": 1, "tagB": 2}`
-  - metadata 中的标签会通过该映射转为 `keyword_ids`（标签匹配忽略大小写）
-  - 若 `tag-id-map` 缺失某个标签，会尝试使用数据库 `tag_id_map` 中的映射；若 map 与数据库都缺失则报错终止
-  - 若 map 出现重复 id 且与数据库映射冲突，则使用数据库映射；若数据库无该 id 映射则报错终止
-- `--db-url sqlite:///./comicsearch.db`（或任意 SQLAlchemy URL）用于常规 DB 索引（`manga/pack/keyword/pack_keyword`）
+- metadata 中的标签会映射为 `keyword_ids`（标签匹配忽略大小写）
+  - 若数据库 `tag_id_map` 中缺失某个标签，会自动分配新的 `keyword_id`，并写入数据库 `tag_id_map` + `keyword`
+  - 若数据库存在重复或冲突映射，以数据库中已有映射为准
+- `--tag-map-output /abs/path/tag_id_map.json` 导出生效映射（数据库映射 + 自动新增标签）；默认导出到项目根目录 `tag_id_map.json`
+- `--db-url sqlite:///./comicsearch.db`（或任意 SQLAlchemy URL）用于常规 DB 索引（`pack/keyword/pack_keyword/tag_id_map`）
 - `--reset-state` 从头重新索引
 
 每个图集根目录都需要放一个 `metadata.json`，格式如下：
@@ -144,7 +140,8 @@ Payload 包含：
 
 其中：
 - `title` 会写入数据库 `pack.title`
-- `tags` 会通过 `--tag-id-map` 映射为 `keyword_ids`
+- `tags` 会映射为 `keyword_ids`（优先使用数据库映射，缺失时自动新增并入库）
+- 本次生效映射会导出为 `tag_id_map.json`（可用于审阅与复用）
 
 目录扫描规则：
 - `index_all_datasets.py` 对每个 `--datasets-root` 会先检查自身是否是图包根目录（存在 `metadata.json`）。

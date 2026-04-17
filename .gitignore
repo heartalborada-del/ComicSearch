@@ -1,4 +1,8 @@
 __pycache__/
+.idea
 *.py[cod]
-test
 models
+comics
+comicsearch.db
+tag_id_map.json
+.cache

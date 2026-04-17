@@ -1,6 +1,9 @@
 import unittest
 from types import SimpleNamespace
 
+from qdrant_client import QdrantClient
+from qdrant_client.qdrant_remote import QdrantRemote
+
 from app.search_service import SearchService
 
 
@@ -8,17 +11,17 @@ class SearchServiceTests(unittest.TestCase):
     def test_aggregate_and_confidence(self):
         service = SearchService(qdrant_client=None)
         points = [
-            SimpleNamespace(id=1, score=0.9, payload={"manga_id": 1, "pack_id": 11, "cover_thumb_path": "a.jpg"}),
-            SimpleNamespace(id=2, score=0.87, payload={"manga_id": 1, "pack_id": 11, "cover_thumb_path": "a.jpg"}),
-            SimpleNamespace(id=3, score=0.85, payload={"manga_id": 1, "pack_id": 12, "cover_thumb_path": "b.jpg"}),
-            SimpleNamespace(id=4, score=0.8, payload={"manga_id": 2, "pack_id": 21, "cover_thumb_path": "c.jpg"}),
+            SimpleNamespace(id=1, score=0.9, payload={"pack_id": 11, "cover_thumb_path": "a.jpg"}),
+            SimpleNamespace(id=2, score=0.87, payload={"pack_id": 11, "cover_thumb_path": "a.jpg"}),
+            SimpleNamespace(id=3, score=0.85, payload={"pack_id": 12, "cover_thumb_path": "b.jpg"}),
+            SimpleNamespace(id=4, score=0.8, payload={"pack_id": 21, "cover_thumb_path": "c.jpg"}),
         ]
 
         manga = service.aggregate_manga(points)
-        self.assertEqual(manga[0]["manga_id"], 1)
+        self.assertEqual(manga[0]["pack_id"], 11)
         self.assertIn(service.confidence(manga), {"medium", "high"})
 
-        packs = service.aggregate_packs_for_manga(points, manga_id=1)
+        packs = service.aggregate_packs_for_manga(points, pack_id=11)
         self.assertEqual(packs[0]["pack_id"], 11)
         self.assertEqual(packs[0]["cover_thumb_path"], "a.jpg")
 
@@ -32,11 +35,11 @@ class SearchServiceTests(unittest.TestCase):
                 self.calls += 1
                 if self.calls == 1:
                     return [
-                        SimpleNamespace(id=1, score=0.6, payload={"manga_id": 1, "pack_id": 1}),
-                        SimpleNamespace(id=2, score=0.7, payload={"manga_id": 2, "pack_id": 2}),
+                        SimpleNamespace(id=1, score=0.6, payload={"pack_id": 1}),
+                        SimpleNamespace(id=2, score=0.7, payload={"pack_id": 2}),
                     ]
                 return [
-                    SimpleNamespace(id=1, score=0.9, payload={"manga_id": 1, "pack_id": 1}),
+                    SimpleNamespace(id=1, score=0.9, payload={"pack_id": 1}),
                 ]
 
         service = SearchService(FakeClient())

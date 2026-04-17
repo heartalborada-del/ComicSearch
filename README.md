@@ -1,7 +1,7 @@
 # ComicSearch
 
 FastAPI-based manga/comic image search backend with:
-- SQLAlchemy ORM (`manga`, `pack`, `keyword`, `pack_keyword`, `tag_id_map`)
+- SQLAlchemy ORM (`pack`, `keyword`, `pack_keyword`, `tag_id_map`)
 - ONNXRuntime image embeddings (CPU-first, CLIP-style preprocessing)
 - Qdrant vector retrieval with AND keyword filtering and manga-level ranking
 
@@ -60,19 +60,15 @@ Response format:
 
 ```json
 {
-  "best_manga": {"manga_id": 101, "score": 0.42, "hits": 4, "top1_score": 0.91},
+  "best_manga": {"pack_id": 101, "score": 0.42, "hits": 4, "top1_score": 0.91},
   "confidence": "high",
-  "candidate_manga": [],
-  "top_packs_in_best_manga": [
-    {"pack_id": 55, "score": 0.88, "hits": 3, "cover_thumb_path": "..."}
-  ]
+  "candidate_manga": []
 }
 ```
 
 ## Data/indexing expectations
 
 Qdrant collection payload should include:
-- `manga_id` (int)
 - `pack_id` (int)
 - `keyword_ids` (int array)
 - `cover_thumb_path` (string)
@@ -123,16 +119,16 @@ python scripts/index_all_datasets.py \
 ```
 
 Payload includes:
-- `manga_id`, `pack_id`, `keyword_ids`, `cover_thumb_path`
+- `pack_id`, `keyword_ids`, `cover_thumb_path`
 - `page_no`, `page_path`, `source_type`
 - crop metadata when applicable: `crop_bbox`, `crop_score`, `crop_original_path`
 
 Optional config:
-- `--tag-id-map /abs/path/tag_id_map.json` where format is `{"tagA": 1, "tagB": 2}`
-  - tags from each dataset root's `metadata.json` are mapped to `keyword_ids` using this map (case-insensitive)
-  - if a tag is missing in the provided map, the indexer falls back to the DB `tag_id_map`; if both are missing, indexing fails fast
-  - if duplicate ids conflict with DB mappings, DB mappings are used; if no DB mapping exists for that id, indexing fails fast
-- `--db-url sqlite:///./comicsearch.db` (or any SQLAlchemy URL) for normal DB indexing (`manga/pack/keyword/pack_keyword`)
+- metadata tags are mapped to `keyword_ids` (case-insensitive)
+  - if a tag is missing in DB `tag_id_map`, a new `keyword_id` is auto-assigned and persisted into DB `tag_id_map` + `keyword`
+  - if DB mappings are duplicated or conflicting, existing DB mappings are treated as authoritative
+- `--tag-map-output /abs/path/tag_id_map.json` to export the effective map (DB map + auto-added tags); defaults to project root `tag_id_map.json`
+- `--db-url sqlite:///./comicsearch.db` (or any SQLAlchemy URL) for normal DB indexing (`pack/keyword/pack_keyword/tag_id_map`)
 - `--reset-state` to re-index everything from scratch
 
 Each dataset root must contain a `metadata.json` file with this shape:
@@ -145,6 +141,8 @@ Each dataset root must contain a `metadata.json` file with this shape:
 ```
 
 The `title` value is stored in `pack.title`.
+The `tags` values are mapped to `keyword_ids` (DB mappings are used first, and missing tags are auto-added).
+The effective mapping is exported to `tag_id_map.json` for review and reuse.
 
 Dataset root discovery rules:
 - for each `--datasets-root`, if `metadata.json` exists in that directory, it is treated as a dataset root

@@ -113,6 +113,7 @@ def create_app(embedder: Any | None = None, search_service: Any | None = None) -
         else:
             vectors = [app.state.runtime.embedder.embed_bytes(image_bytes)]
 
+
         points = app.state.runtime.search_service.search_pages_multi_view(
             vectors=vectors,
             keyword_ids=parsed_keyword_ids,
@@ -121,19 +122,11 @@ def create_app(embedder: Any | None = None, search_service: Any | None = None) -
 
         candidate_manga = app.state.runtime.search_service.aggregate_manga(points, top_k=int(top_k_manga))
         best_manga = candidate_manga[0] if candidate_manga else None
-        top_packs: list[dict[str, Any]] = []
-        if best_manga is not None:
-            top_packs = app.state.runtime.search_service.aggregate_packs_for_manga(
-                points,
-                manga_id=best_manga["manga_id"],
-                top_k=int(top_k_packs),
-            )
 
         return {
             "best_manga": best_manga,
             "confidence": app.state.runtime.search_service.confidence(candidate_manga),
             "candidate_manga": candidate_manga,
-            "top_packs_in_best_manga": top_packs,
         }
 
     return app
