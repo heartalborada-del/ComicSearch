@@ -319,7 +319,6 @@ def iter_page_items(
                 "pack_id": pack_id,
                 "keyword_ids": build_keyword_ids(dataset_metadata.tags, tag_id_map, path_str),
                 "page_no": page_no,
-                "page_path": path_str,
                 "source_type": "page",
             }
             yield IndexItem(
@@ -366,7 +365,6 @@ def iter_crop_items(
                 "pack_id": original_pack_id,
                 "keyword_ids": build_keyword_ids(metadata_tags, tag_id_map, original_path_str),
                 "page_no": original_page_no,
-                "page_path": original_path_str,
                 "source_type": "face_crop",
             }
             yield IndexItem(

@@ -163,7 +163,7 @@ python scripts/index_all_datasets.py \
 
 Payload 包含：
 - `pack_id`、`keyword_ids`、`cover_thumb_path`
-- `page_no`、`page_path`、`source_type`
+- `page_no`、`source_type`
 - 裁剪图相关元数据（如有）：`crop_bbox`、`crop_score`、`crop_original_path`
 
 可选参数：

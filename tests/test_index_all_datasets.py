@@ -362,6 +362,8 @@ class CropItemTests(unittest.TestCase):
             self.assertEqual(len(items), 2)
             self.assertEqual(items[0].payload["pack_id"], 1)
             self.assertIsNone(items[1].payload["pack_id"])
+            self.assertNotIn("page_path", items[0].payload)
+            self.assertNotIn("page_path", items[1].payload)
 
     def test_iter_crop_items_skips_rows_without_metadata_root(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -425,6 +427,7 @@ class CropItemTests(unittest.TestCase):
 
             self.assertEqual(len(items), 1)
             self.assertEqual(items[0].payload["pack_id"], 1)
+            self.assertNotIn("page_path", items[0].payload)
 
 
 if __name__ == "__main__":
