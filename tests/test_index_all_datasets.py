@@ -16,6 +16,7 @@ from scripts.index_all_datasets import (
     iter_crop_items,
     load_dataset_metadata,
     load_tag_id_map,
+    normalize_title,
     normalize_tag,
     parse_page_no,
     resolve_effective_tag_maps,
@@ -44,6 +45,15 @@ def write_comicinfo(path: Path, *, title: str, tags: list[str], web: str | None 
 
 
 class TagMetadataTests(unittest.TestCase):
+    def test_normalize_title_removes_trailing_bracket_tags(self):
+        self.assertEqual(normalize_title("作品名 [英訳] [DL版]"), "作品名")
+
+    def test_normalize_title_keeps_fully_bracketed_title(self):
+        self.assertEqual(normalize_title("【推しの皮】"), "【推しの皮】")
+
+    def test_normalize_title_keeps_non_trailing_or_non_bracket_parts(self):
+        self.assertEqual(normalize_title("[合集] 作品名"), "[合集] 作品名")
+
     def test_load_tag_id_map(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "tag_map.json"

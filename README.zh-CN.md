@@ -17,6 +17,22 @@
 pip install -r requirements.txt
 ```
 
+按推理后端安装（可选）：
+
+- CUDA（NVIDIA）：
+
+```bash
+pip install -r requirements-cuda.txt
+```
+
+- DirectML（Windows GPU）：
+
+```bash
+pip install -r requirements-directml.txt
+```
+
+不要在同一个 Python 环境里同时安装 `onnxruntime-gpu` 和 `onnxruntime-directml`。如需两种后端，请分别创建虚拟环境。
+
 ## 配置
 
 环境变量：

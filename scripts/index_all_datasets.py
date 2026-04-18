@@ -30,6 +30,7 @@ from app.natural_sort import NaturalComparator
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 COMICINFO_FILENAME = "ComicInfo.xml"
+TRAILING_TITLE_SINGLE_TAG_PATTERN = re.compile(r"\s*[\[［【][^\]］】]+[\]］】]\s*$")
 
 T = TypeVar("T")
 
@@ -122,6 +123,24 @@ def normalize_tag(tag: str) -> str:
     return f"{prefix}:{'_'.join(suffix.strip().split())}"
 
 
+def normalize_title(title: str) -> str:
+    """Normalize display title by removing trailing bracketed release tags.
+
+    Example: "some title [英訳] [DL版]" -> "some title"
+    """
+    normalized = title.strip()
+    while True:
+        match = TRAILING_TITLE_SINGLE_TAG_PATTERN.search(normalized)
+        if match is None:
+            break
+        prefix = normalized[: match.start()].strip()
+        if not prefix:
+            # Keep fully bracketed titles like "【推しの皮】".
+            break
+        normalized = prefix
+    return normalized
+
+
 def load_tag_id_map(path: Path | None) -> dict[str, int]:
     if path is None:
         return {}
@@ -174,6 +193,9 @@ def load_dataset_metadata(dataset_roots: list[Path]) -> dict[Path, DatasetMetada
         title = _clean_text(root.findtext("Title"))
         if not title:
             raise ValueError(f'dataset metadata must contain a non-empty "Title": {metadata_path}')
+        title = normalize_title(title)
+        if not title:
+            raise ValueError(f'dataset metadata title became empty after normalization: {metadata_path}')
 
         tags_text = _clean_text(root.findtext("Tags"))
         tags = [tag.strip() for tag in tags_text.split(",") if tag.strip()] if tags_text else []

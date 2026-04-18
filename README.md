@@ -19,6 +19,22 @@ FastAPI-based manga/comic image search backend with:
 pip install -r requirements.txt
 ```
 
+Backend-specific alternatives:
+
+- CUDA (NVIDIA):
+
+```bash
+pip install -r requirements-cuda.txt
+```
+
+- DirectML (Windows GPU):
+
+```bash
+pip install -r requirements-directml.txt
+```
+
+Do not install `onnxruntime-gpu` and `onnxruntime-directml` in the same environment. Use separate virtual environments for each backend.
+
 ## Configuration
 
 Environment variables:

@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+import warnings
 
 import cv2
 import numpy as np
@@ -58,14 +59,35 @@ def detect_faces(
     confidence_threshold: float,
     max_detections_per_image: int,
     class_ids: list[int] | None,
+    device: str | None,
 ) -> list[Detection]:
     detections: list[Detection] = []
-    results = detector.predict(
-        source=image,
-        conf=confidence_threshold,
-        classes=class_ids,
-        verbose=False,
-    )
+    predict_kwargs = {
+        "source": image,
+        "conf": confidence_threshold,
+        "classes": class_ids,
+        "verbose": False,
+    }
+    if device:
+        predict_kwargs["device"] = device
+
+    try:
+        results = detector.predict(**predict_kwargs)
+    except NotImplementedError as exc:
+        if device and device.lower() != "cpu" and "torchvision::nms" in str(exc):
+            warnings.warn(
+                f"YOLO inference on device '{device}' failed because torchvision::nms is unavailable; retrying on CPU.",
+                RuntimeWarning,
+            )
+            results = detector.predict(
+                source=image,
+                conf=confidence_threshold,
+                classes=class_ids,
+                verbose=False,
+                device="cpu",
+            )
+        else:
+            raise
     if not results:
         return detections
 
@@ -122,6 +144,7 @@ def build_face_crops(args: argparse.Namespace) -> None:
         )
     detector = YOLO(str(yolo_model_path))
     class_ids = parse_yolo_classes(args.yolo_classes)
+    device = str(args.device).strip() or "cpu"
 
     written = 0
     scanned = 0
@@ -139,6 +162,7 @@ def build_face_crops(args: argparse.Namespace) -> None:
                     confidence_threshold=float(args.confidence_threshold),
                     max_detections_per_image=int(args.max_detections_per_image),
                     class_ids=class_ids,
+                    device=device,
                 )
                 if not detections:
                     continue
@@ -216,6 +240,11 @@ def parse_args() -> argparse.Namespace:
         "--yolo-classes",
         default=None,
         help="Optional comma-separated class ids to keep (e.g. '0,1'). Defaults to all classes.",
+    )
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        help="Inference device for YOLO, such as 'cpu' or 'cuda:0'. Defaults to 'cpu' to avoid CUDA torchvision NMS issues.",
     )
     return parser.parse_args()
 
