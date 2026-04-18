@@ -14,8 +14,12 @@ from qdrant_client.http import models as qm
 
 class SearchService:
     """Qdrant vector search and manga-first aggregation service."""
-    # Log hit-count bonus weight used when scoring aggregated manga candidates.
-    HITS_BONUS_WEIGHT = 0.03
+    # Score weights tuned for better precision on high-similarity manga line-art.
+    TOP1_WEIGHT = 0.7
+    TOP3_AVG_WEIGHT = 0.25
+    HITS_BONUS_WEIGHT = 0.01
+    TOP1_HIGH_CONF_THRESHOLD = 0.995
+    TOP1_MEDIUM_CONF_THRESHOLD = 0.985
 
     def __init__(self, qdrant_client: QdrantClient, collection_name: str = "pages") -> None:
         self.qdrant = qdrant_client
@@ -84,15 +88,23 @@ class SearchService:
         for pack_id, items in grouped.items():
             items.sort(key=lambda item: item[0], reverse=True)
             top_scores = [score for score, _ in items[:5]]
-            avg_top = sum(top_scores) / len(top_scores)
+            top3 = top_scores[:3]
+            top1 = top_scores[0]
+            top_payload = items[0][1]
+            avg_top3 = sum(top3) / len(top3)
             hits = len(items)
-            score = avg_top + self.HITS_BONUS_WEIGHT * log(1 + hits)
+            score = (
+                self.TOP1_WEIGHT * top1
+                + self.TOP3_AVG_WEIGHT * avg_top3
+                + self.HITS_BONUS_WEIGHT * log(1 + hits)
+            )
             ranked.append(
                 {
                     "pack_id": pack_id,
                     "score": round(score, 6),
                     "hits": hits,
                     "top1_score": round(top_scores[0], 6),
+                    "top_page_no": top_payload.get("page_no"),
                 }
             )
 
@@ -129,10 +141,18 @@ class SearchService:
     def confidence(self, manga_candidates: list[dict[str, Any]]) -> str:
         if not manga_candidates:
             return "low"
-        if len(manga_candidates) == 1:
-            return "high" if manga_candidates[0]["hits"] >= 2 else "medium"
 
-        first, second = manga_candidates[0], manga_candidates[1]
+        first = manga_candidates[0]
+        top1_score = float(first.get("top1_score", 0.0))
+        if top1_score >= self.TOP1_HIGH_CONF_THRESHOLD:
+            return "high"
+        if top1_score >= self.TOP1_MEDIUM_CONF_THRESHOLD:
+            return "medium"
+
+        if len(manga_candidates) == 1:
+            return "high" if first["hits"] >= 2 else "medium"
+
+        second = manga_candidates[1]
         margin = first["score"] - second["score"]
         if first["hits"] >= 3 and margin >= 0.05:
             return "high"

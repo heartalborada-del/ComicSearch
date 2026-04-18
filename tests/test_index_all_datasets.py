@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ from scripts.index_all_datasets import (
     discover_dataset_roots,
     ensure_metadata_tags_mapped,
     export_tag_id_map,
+    iter_crop_items,
     load_dataset_metadata,
     load_tag_id_map,
     normalize_tag,
@@ -30,6 +32,17 @@ def make_session() -> Session:
     return session_cls()
 
 
+def write_comicinfo(path: Path, *, title: str, tags: list[str], web: str | None = None, url: str | None = None) -> None:
+    tags_text = ", ".join(tags)
+    parts = ["<?xml version=\"1.0\" encoding=\"utf-8\"?>", "<ComicInfo>", f"  <Title>{title}</Title>", f"  <Tags>{tags_text}</Tags>"]
+    if web is not None:
+        parts.append(f"  <Web>{web}</Web>")
+    if url is not None:
+        parts.append(f"  <URL>{url}</URL>")
+    parts.append("</ComicInfo>")
+    path.write_text("\n".join(parts), encoding="utf-8")
+
+
 class TagMetadataTests(unittest.TestCase):
     def test_load_tag_id_map(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -43,15 +56,41 @@ class TagMetadataTests(unittest.TestCase):
             root2 = Path(tmp) / "dataset2"
             root1.mkdir(parents=True, exist_ok=True)
             root2.mkdir(parents=True, exist_ok=True)
-            (root1 / "metadata.json").write_text('{"title": "album one", "tags": ["action", "school"]}', encoding="utf-8")
-            (root2 / "metadata.json").write_text('{"title": "album two", "tags": ["romance"]}', encoding="utf-8")
+            write_comicinfo(root1 / "ComicInfo.xml", title="album one", tags=["action", "school"], web="https://example.com/1")
+            write_comicinfo(root2 / "ComicInfo.xml", title="album two", tags=["romance"], url="https://example.com/2")
 
             metadata_by_root = load_dataset_metadata([root1, root2])
 
             self.assertEqual(metadata_by_root[root1.resolve()].title, "album one")
             self.assertEqual(metadata_by_root[root1.resolve()].tags, ["action", "school"])
+            self.assertEqual(metadata_by_root[root1.resolve()].source, "https://example.com/1")
             self.assertEqual(metadata_by_root[root2.resolve()].title, "album two")
             self.assertEqual(metadata_by_root[root2.resolve()].tags, ["romance"])
+            self.assertEqual(metadata_by_root[root2.resolve()].source, "https://example.com/2")
+
+    def test_load_dataset_metadata_splits_tags_and_prefers_web_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "dataset"
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "ComicInfo.xml").write_text(
+                "\n".join(
+                    [
+                        '<?xml version="1.0" encoding="utf-8"?>',
+                        "<ComicInfo>",
+                        "  <Title>album</Title>",
+                        "  <Tags> action, romance , ,artist: yamadori kodi </Tags>",
+                        "  <Web>https://example.com/web</Web>",
+                        "  <URL>https://example.com/url</URL>",
+                        "</ComicInfo>",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            metadata = load_dataset_metadata([root])[root.resolve()]
+
+            self.assertEqual(metadata.tags, ["action", "romance", "artist: yamadori kodi"])
+            self.assertEqual(metadata.source, "https://example.com/web")
 
     def test_build_keyword_ids(self):
         ids = build_keyword_ids(
@@ -114,8 +153,8 @@ class DatasetDiscoveryTests(unittest.TestCase):
             pack_b = base / "pack_b"
             pack_a.mkdir(parents=True, exist_ok=True)
             pack_b.mkdir(parents=True, exist_ok=True)
-            (pack_a / "metadata.json").write_text('{"title": "a", "tags": ["t1"]}', encoding="utf-8")
-            (pack_b / "metadata.json").write_text('{"title": "b", "tags": ["t2"]}', encoding="utf-8")
+            write_comicinfo(pack_a / "ComicInfo.xml", title="a", tags=["t1"])
+            write_comicinfo(pack_b / "ComicInfo.xml", title="b", tags=["t2"])
 
             roots = discover_dataset_roots([str(base)])
 
@@ -160,10 +199,12 @@ class DbUpsertTests(unittest.TestCase):
                 image_path=Path("/tmp/a.jpg"),
                 payload={"pack_id": 10, "keyword_ids": [100, 101]},
                 pack_title="album one",
+                pack_source="https://example.com/album-one",
             )
         ]
         upsert_db_records(session, items, {100: "action", 101: "romance"})
         self.assertEqual(session.get(Pack, 10).title, "album one")
+        self.assertEqual(session.get(Pack, 10).source, "https://example.com/album-one")
         self.assertEqual(session.get(Keyword, 100).name, "action")
         self.assertEqual(session.get(TagIdMap, "action").keyword_id, 100)
         self.assertIsNotNone(session.get(PackKeyword, {"pack_id": 10, "keyword_id": 100}))
@@ -199,6 +240,7 @@ class DbUpsertTests(unittest.TestCase):
                 image_path=Path("/tmp/a.jpg"),
                 payload={"pack_id": None, "keyword_ids": [100]},
                 pack_title="album one",
+                pack_source="https://example.com/album-one",
             )
         ]
 
@@ -218,6 +260,7 @@ class DbUpsertTests(unittest.TestCase):
                 image_path=Path("/tmp/b.jpg"),
                 payload={"pack_id": None, "keyword_ids": [101]},
                 pack_title="new album",
+                pack_source="https://example.com/new-album",
             )
         ]
 
@@ -245,6 +288,133 @@ class ParsePageNoTests(unittest.TestCase):
 
     def test_parse_page_no_target_not_in_list(self):
         self.assertIsNone(parse_page_no("missing.webp", ["a.webp", "b.webp"]))
+
+
+class CropItemTests(unittest.TestCase):
+    def test_iter_crop_items_keeps_rows_without_original_pack_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset_root = tmp_path / "dataset"
+            dataset_root.mkdir(parents=True, exist_ok=True)
+            write_comicinfo(dataset_root / "ComicInfo.xml", title="album", tags=[])
+
+            valid_original = dataset_root / "pack_1" / "01.webp"
+            valid_original.parent.mkdir(parents=True, exist_ok=True)
+            valid_original.write_bytes(b"fake")
+
+            invalid_original = dataset_root / "no_pack" / "01.webp"
+            invalid_original.parent.mkdir(parents=True, exist_ok=True)
+            invalid_original.write_bytes(b"fake")
+
+            valid_crop = tmp_path / "crop_valid.jpg"
+            valid_crop.write_bytes(b"fake")
+            invalid_crop = tmp_path / "crop_invalid.jpg"
+            invalid_crop.write_bytes(b"fake")
+
+            manifest = tmp_path / "manifest.jsonl"
+            manifest.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "original_image_path": str(valid_original),
+                                "crop_image_path": str(valid_crop),
+                                "bbox": [0, 0, 10, 10],
+                                "score": 0.9,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            {
+                                "original_image_path": str(invalid_original),
+                                "crop_image_path": str(invalid_crop),
+                                "bbox": [0, 0, 10, 10],
+                                "score": 0.8,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            metadata_by_root = load_dataset_metadata([dataset_root])
+            items = list(
+                iter_crop_items(
+                    manifest,
+                    [dataset_root],
+                    metadata_by_root,
+                    {},
+                    {dataset_root.resolve(): [str((valid_original).relative_to(dataset_root))]},
+                )
+            )
+
+            self.assertEqual(len(items), 2)
+            self.assertEqual(items[0].payload["pack_id"], 1)
+            self.assertIsNone(items[1].payload["pack_id"])
+
+    def test_iter_crop_items_skips_rows_without_metadata_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            dataset_root = tmp_path / "dataset"
+            dataset_root.mkdir(parents=True, exist_ok=True)
+            write_comicinfo(dataset_root / "ComicInfo.xml", title="album", tags=[])
+
+            valid_original = dataset_root / "pack_1" / "01.webp"
+            valid_original.parent.mkdir(parents=True, exist_ok=True)
+            valid_original.write_bytes(b"fake")
+
+            orphan_root = tmp_path / "orphan_dataset"
+            orphan_root.mkdir(parents=True, exist_ok=True)
+            orphan_original = orphan_root / "pack_2" / "01.webp"
+            orphan_original.parent.mkdir(parents=True, exist_ok=True)
+            orphan_original.write_bytes(b"fake")
+
+            valid_crop = tmp_path / "crop_valid.jpg"
+            valid_crop.write_bytes(b"fake")
+            orphan_crop = tmp_path / "crop_orphan.jpg"
+            orphan_crop.write_bytes(b"fake")
+
+            manifest = tmp_path / "manifest.jsonl"
+            manifest.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "original_image_path": str(valid_original),
+                                "crop_image_path": str(valid_crop),
+                                "bbox": [0, 0, 10, 10],
+                                "score": 0.9,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            {
+                                "original_image_path": str(orphan_original),
+                                "crop_image_path": str(orphan_crop),
+                                "bbox": [0, 0, 10, 10],
+                                "score": 0.8,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            metadata_by_root = load_dataset_metadata([dataset_root])
+            items = list(
+                iter_crop_items(
+                    manifest,
+                    [dataset_root],
+                    metadata_by_root,
+                    {},
+                    {dataset_root.resolve(): [str((valid_original).relative_to(dataset_root))]},
+                )
+            )
+
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0].payload["pack_id"], 1)
 
 
 if __name__ == "__main__":

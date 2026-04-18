@@ -13,6 +13,7 @@ class Pack(Base):
 
     pack_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     title: Mapped[str | None] = mapped_column(String, nullable=True)
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
 
     keywords: Mapped[list[PackKeyword]] = relationship(back_populates="pack", cascade="all, delete-orphan")
 

@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from functools import cmp_to_key
 from pathlib import Path
@@ -28,6 +29,7 @@ from app.natural_sort import NaturalComparator
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+COMICINFO_FILENAME = "ComicInfo.xml"
 
 T = TypeVar("T")
 
@@ -38,12 +40,14 @@ class IndexItem:
     image_path: Path
     payload: dict[str, Any]
     pack_title: str | None = None
+    pack_source: str | None = None
 
 
 @dataclass(frozen=True)
 class DatasetMetadata:
     title: str
     tags: list[str]
+    source: str | None = None
 
 
 def parse_int_from_tokens(path_value: str, token: str) -> int | None:
@@ -89,10 +93,10 @@ def discover_dataset_roots(root_args: list[str]) -> list[Path]:
             raise FileNotFoundError(f"datasets root not found: {base_root}")
 
         candidates: list[Path] = []
-        if (base_root / "metadata.json").exists():
+        if (base_root / COMICINFO_FILENAME).exists():
             candidates.append(base_root)
         for child in sorted(base_root.iterdir()):
-            if child.is_dir() and (child / "metadata.json").exists():
+            if child.is_dir() and (child / COMICINFO_FILENAME).exists():
                 candidates.append(child.resolve())
 
         for candidate in candidates:
@@ -102,7 +106,9 @@ def discover_dataset_roots(root_args: list[str]) -> list[Path]:
                 seen.add(resolved)
 
     if not discovered:
-        raise ValueError("no dataset roots found: expected metadata.json in each dataset root or its first-level subdirectories")
+        raise ValueError(
+            f"no dataset roots found: expected {COMICINFO_FILENAME} in each dataset root or its first-level subdirectories"
+        )
     return discovered
 
 
@@ -140,33 +146,43 @@ def load_tag_id_map(path: Path | None) -> dict[str, int]:
 
 
 def load_dataset_metadata(dataset_roots: list[Path]) -> dict[Path, DatasetMetadata]:
-    """Load per-root metadata.json files.
+    """Load per-root ComicInfo.xml files.
 
-    Expected format for each dataset root:
-    {"title": "album title", "tags": ["a", "b"]}
+    Expected fields for each dataset root:
+    <Title>, <Tags>, optional <Web> / <URL>.
     """
 
     metadata_by_root: dict[Path, DatasetMetadata] = {}
     for dataset_root in dataset_roots:
-        metadata_path = dataset_root / "metadata.json"
+        metadata_path = dataset_root / COMICINFO_FILENAME
         if not metadata_path.exists():
             raise FileNotFoundError(f"dataset metadata file not found: {metadata_path}")
-        with metadata_path.open("r", encoding="utf-8") as fp:
-            data = json.load(fp)
-        if not isinstance(data, dict):
-            raise ValueError(f"dataset metadata must be a JSON object: {metadata_path}")
 
-        title = data.get("title")
-        if not isinstance(title, (str, int, float)):
-            raise ValueError(f'dataset metadata must contain a string "title": {metadata_path}')
+        try:
+            tree = ET.parse(metadata_path)
+        except ET.ParseError as exc:
+            raise ValueError(f"invalid ComicInfo.xml: {metadata_path} ({exc})") from exc
 
-        tags_value = data.get("tags", [])
-        if not isinstance(tags_value, list):
-            raise ValueError(f'dataset metadata "tags" must be a list: {metadata_path}')
+        root = tree.getroot()
+
+        def _clean_text(value: str | None) -> str | None:
+            if value is None:
+                return None
+            cleaned = value.strip()
+            return cleaned if cleaned else None
+
+        title = _clean_text(root.findtext("Title"))
+        if not title:
+            raise ValueError(f'dataset metadata must contain a non-empty "Title": {metadata_path}')
+
+        tags_text = _clean_text(root.findtext("Tags"))
+        tags = [tag.strip() for tag in tags_text.split(",") if tag.strip()] if tags_text else []
+        source = _clean_text(root.findtext("Web")) or _clean_text(root.findtext("URL"))
 
         metadata_by_root[dataset_root.resolve()] = DatasetMetadata(
-            title=str(title),
-            tags=[str(tag) for tag in tags_value if isinstance(tag, (str, int, float))],
+            title=title,
+            tags=tags,
+            source=source,
         )
     return metadata_by_root
 
@@ -289,6 +305,7 @@ def iter_page_items(
                 image_path=image_path,
                 payload=payload,
                 pack_title=dataset_metadata.title,
+                pack_source=dataset_metadata.source,
             )
 
 
@@ -309,8 +326,13 @@ def iter_crop_items(
             crop_image_path = Path(row["crop_image_path"]).resolve()
             original_image_path = Path(row["original_image_path"]).resolve()
             original_path_str = str(original_image_path)
+            original_pack_id = parse_int_from_tokens(original_path_str, "pack")
             dataset_root = find_dataset_root(original_image_path, dataset_roots)
-            dataset_metadata = metadata_by_root.get(dataset_root.resolve()) if dataset_root is not None else None
+            if dataset_root is None:
+                continue
+            dataset_metadata = metadata_by_root.get(dataset_root.resolve())
+            if dataset_metadata is None:
+                continue
             metadata_tags = dataset_metadata.tags if dataset_metadata is not None else []
             original_page_no: int | None = None
             if dataset_root is not None:
@@ -319,7 +341,7 @@ def iter_crop_items(
                 all_names = image_name_lists_by_root.get(dataset_root_resolved, [])
                 original_page_no = parse_page_no(relative_name, all_names)
             payload = {
-                "pack_id": parse_int_from_tokens(original_path_str, "pack"),
+                "pack_id": original_pack_id,
                 "keyword_ids": build_keyword_ids(metadata_tags, tag_id_map, original_path_str),
                 "page_no": original_page_no,
                 "page_path": original_path_str,
@@ -330,6 +352,7 @@ def iter_crop_items(
                 image_path=crop_image_path,
                 payload=payload,
                 pack_title=dataset_metadata.title if dataset_metadata is not None else None,
+                pack_source=dataset_metadata.source if dataset_metadata is not None else None,
             )
 
 
@@ -339,6 +362,7 @@ def upsert_db_records(
     keyword_names_by_id: dict[int, str],
 ) -> None:
     title_to_pack_id: dict[str, int] = {}
+    source_by_pack_id: dict[int, str] = {}
     for row in session.query(Pack.pack_id, Pack.title).all():
         if not row.title:
             continue
@@ -352,6 +376,8 @@ def upsert_db_records(
         if payload.get("pack_id") is not None:
             if item.pack_title:
                 title_to_pack_id.setdefault(item.pack_title, int(payload["pack_id"]))
+                if item.pack_source:
+                    source_by_pack_id.setdefault(int(payload["pack_id"]), item.pack_source)
             continue
 
         if not item.pack_title:
@@ -359,11 +385,13 @@ def upsert_db_records(
 
         pack_id = title_to_pack_id.get(item.pack_title)
         if pack_id is None:
-            pack = Pack(title=item.pack_title)
+            pack = Pack(title=item.pack_title, source=item.pack_source)
             session.add(pack)
             session.flush()
             pack_id = int(pack.pack_id)
             title_to_pack_id[item.pack_title] = pack_id
+        elif item.pack_source:
+            source_by_pack_id.setdefault(pack_id, item.pack_source)
 
         payload["pack_id"] = pack_id
 
@@ -382,9 +410,16 @@ def upsert_db_records(
     for pack_id, title in sorted(pack_titles.items()):
         pack = session.get(Pack, pack_id)
         if pack is None:
-            session.add(Pack(pack_id=pack_id, title=title))
+            session.add(Pack(pack_id=pack_id, title=title, source=source_by_pack_id.get(pack_id)))
         elif pack.title != title:
             pack.title = title
+            source_value = source_by_pack_id.get(pack_id)
+            if source_value and not pack.source:
+                pack.source = source_value
+        else:
+            source_value = source_by_pack_id.get(pack_id)
+            if source_value and not pack.source:
+                pack.source = source_value
     session.flush()
 
     keyword_ids = {keyword_id for _, keyword_id in pack_keywords}

@@ -44,10 +44,9 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - `keyword_ids`：可选 JSON 整数数组（`[1,2]`），最大长度 20，每个值范围 `1..2147483647`
 - `robust_partial`：布尔值，默认 `true`
 - `include_corners`：布尔值，默认 `true`
-- `include_contrast`：布尔值，默认 `true`
+- `include_contrast`：布尔值，默认 `false`
 - `per_view_limit`：整数，范围 `[10, 300]`，默认 `80`
 - `top_k_manga`：整数，范围 `[1, 50]`，默认 `10`
-- `top_k_packs`：整数，范围 `[1, 100]`，默认 `30`
 
 上传限制：
 - `image` 允许的内容类型：`image/jpeg`、`image/png`、`image/webp`
@@ -58,11 +57,39 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 ```json
 {
-  "best_manga": {"pack_id": 101, "score": 0.42, "hits": 4, "top1_score": 0.91},
+  "best_manga": {"pack_id": 101, "score": 0.42, "hits": 4, "top1_score": 0.91, "top_page_no": 12},
   "confidence": "high",
   "candidate_manga": []
 }
 ```
+
+`top_page_no` 表示该候选包中最高分命中的 `page_no`。如果 payload 缺少 `page_no`，该值可能为 `null`。
+
+## `/info` 接口
+
+支持两种形式：
+- `GET /info/{id}`
+- `GET /info?id=123`
+
+用于按 `pack_id` 查询图包信息。
+
+成功响应示例：
+
+```json
+{
+  "pack_id": 11,
+  "title": "demo pack",
+  "source": "https://example.com/demo-pack",
+  "keyword_ids": [100, 101],
+  "keywords": [
+    {"id": 100, "name": "action"},
+    {"id": 101, "name": "romance"}
+  ]
+}
+```
+
+错误响应：
+- 找不到对应图包时返回 `404`（`pack not found: {id}`）
 
 ## 数据与索引要求
 
@@ -70,6 +97,8 @@ Qdrant collection 的 payload 应包含：
 - `pack_id`（int）
 - `keyword_ids`（int 数组）
 - `cover_thumb_path`（string）
+
+`pack.source` 会写入 SQL，并由 `GET /info` 返回。
 
 向量应使用与查询时相同 ONNX 模型生成，并进行 L2 归一化。
 
@@ -129,23 +158,26 @@ Payload 包含：
 - `--db-url sqlite:///./comicsearch.db`（或任意 SQLAlchemy URL）用于常规 DB 索引（`pack/keyword/pack_keyword/tag_id_map`）
 - `--reset-state` 从头重新索引
 
-每个图集根目录都需要放一个 `metadata.json`，格式如下：
+每个图集根目录都需要放一个 `ComicInfo.xml`，格式如下：
 
-```json
-{
-  "title": "图包名称",
-  "tags": ["tagA", "tagB"]
-}
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<ComicInfo>
+  <Title>图包名称</Title>
+  <Tags>tagA, tagB</Tags>
+  <Web>https://example.com/source</Web>
+</ComicInfo>
 ```
 
 其中：
-- `title` 会写入数据库 `pack.title`
-- `tags` 会映射为 `keyword_ids`（优先使用数据库映射，缺失时自动新增并入库）
+- `Title` 会写入数据库 `pack.title`
+- `Tags` 会按英文逗号分割、去空白后映射为 `keyword_ids`（优先使用数据库映射，缺失时自动新增并入库）
+- `Web` 会写入数据库 `pack.source`；如果 `Web` 为空，则使用 `URL`
 - 本次生效映射会导出为 `tag_id_map.json`（可用于审阅与复用）
 
 目录扫描规则：
-- `index_all_datasets.py` 对每个 `--datasets-root` 会先检查自身是否是图包根目录（存在 `metadata.json`）。
-- 同时支持自动发现该目录下一级子目录中的图包根目录（子目录内存在 `metadata.json`）。
+- `index_all_datasets.py` 对每个 `--datasets-root` 会先检查自身是否是图包根目录（存在 `ComicInfo.xml`）。
+- 同时支持自动发现该目录下一级子目录中的图包根目录（子目录内存在 `ComicInfo.xml`）。
 
 ## ORM 与数据库
 

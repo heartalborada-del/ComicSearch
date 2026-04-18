@@ -5,9 +5,12 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, Path, Query
+from sqlalchemy.orm import Session
 
+from app.db import get_db
 from app.embedder_onnx import OnnxImageEmbedder
+from app.models import Keyword, Pack, PackKeyword
 from app.search_service import SearchService
 
 
@@ -73,16 +76,37 @@ def create_app(embedder: Any | None = None, search_service: Any | None = None) -
     app = FastAPI(title="ComicSearch API", lifespan=lifespan)
     app.state.runtime = runtime
 
+    def _pack_info_response(pack_id: int, db: Session) -> dict[str, Any]:
+        pack = db.get(Pack, int(pack_id))
+        if pack is None:
+            raise HTTPException(status_code=404, detail=f"pack not found: {pack_id}")
+
+        rows = (
+            db.query(Keyword.id, Keyword.name)
+            .join(PackKeyword, PackKeyword.keyword_id == Keyword.id)
+            .filter(PackKeyword.pack_id == int(pack_id))
+            .order_by(Keyword.id.asc())
+            .all()
+        )
+        keywords = [{"id": int(keyword_id), "name": str(keyword_name)} for keyword_id, keyword_name in rows]
+
+        return {
+            "pack_id": int(pack.pack_id),
+            "title": pack.title,
+            "source": pack.source,
+            "keyword_ids": [keyword["id"] for keyword in keywords],
+            "keywords": keywords,
+        }
+
     @app.post("/search")
     async def search(
         image: UploadFile = File(...),
         keyword_ids: str | None = Form(default=None),
         robust_partial: bool = Form(default=True),
         include_corners: bool = Form(default=True),
-        include_contrast: bool = Form(default=True),
+        include_contrast: bool = Form(default=False),
         per_view_limit: int = Form(default=80, ge=10, le=300),
         top_k_manga: int = Form(default=10, ge=1, le=50),
-        top_k_packs: int = Form(default=30, ge=1, le=100),
     ) -> dict[str, Any]:
         if image.content_type not in ALLOWED_IMAGE_CONTENT_TYPES:
             raise HTTPException(
@@ -128,6 +152,20 @@ def create_app(embedder: Any | None = None, search_service: Any | None = None) -
             "confidence": app.state.runtime.search_service.confidence(candidate_manga),
             "candidate_manga": candidate_manga,
         }
+
+    @app.get("/info/{id}")
+    async def info(
+        id: int = Path(..., title="Pack ID"),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        return _pack_info_response(pack_id=int(id), db=db)
+
+    @app.get("/info")
+    async def info_by_query(
+        id: int = Query(..., title="Pack ID"),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        return _pack_info_response(pack_id=int(id), db=db)
 
     return app
 

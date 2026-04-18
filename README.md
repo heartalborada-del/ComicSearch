@@ -46,10 +46,9 @@ Fields:
 - `keyword_ids`: optional JSON int array (`[1,2]`), max length 20, each value in `1..2147483647`
 - `robust_partial`: bool, default `true`
 - `include_corners`: bool, default `true`
-- `include_contrast`: bool, default `true`
+- `include_contrast`: bool, default `false`
 - `per_view_limit`: int in `[10, 300]`, default `80`
 - `top_k_manga`: int in `[1, 50]`, default `10`
-- `top_k_packs`: int in `[1, 100]`, default `30`
 
 Upload constraints:
 - allowed `image` content type: `image/jpeg`, `image/png`, `image/webp`
@@ -60,11 +59,39 @@ Response format:
 
 ```json
 {
-  "best_manga": {"pack_id": 101, "score": 0.42, "hits": 4, "top1_score": 0.91},
+  "best_manga": {"pack_id": 101, "score": 0.42, "hits": 4, "top1_score": 0.91, "top_page_no": 12},
   "confidence": "high",
   "candidate_manga": []
 }
 ```
+
+`top_page_no` is the `page_no` of the highest-scoring hit in that candidate pack. It can be `null` if `page_no` is missing in payload.
+
+## `/info` endpoint
+
+Both forms are supported:
+- `GET /info/{id}`
+- `GET /info?id=123`
+
+Used to query pack metadata by `pack_id`.
+
+Success response example:
+
+```json
+{
+  "pack_id": 11,
+  "title": "demo pack",
+  "source": "https://example.com/demo-pack",
+  "keyword_ids": [100, 101],
+  "keywords": [
+    {"id": 100, "name": "action"},
+    {"id": 101, "name": "romance"}
+  ]
+}
+```
+
+Error response:
+- Returns `404` when the pack does not exist (`pack not found: {id}`)
 
 ## Data/indexing expectations
 
@@ -72,6 +99,8 @@ Qdrant collection payload should include:
 - `pack_id` (int)
 - `keyword_ids` (int array)
 - `cover_thumb_path` (string)
+
+Pack source is stored in SQL as `pack.source` and returned by `GET /info`.
 
 Vectors should be L2-normalized embeddings from the same ONNX model used at query time.
 
@@ -131,22 +160,25 @@ Optional config:
 - `--db-url sqlite:///./comicsearch.db` (or any SQLAlchemy URL) for normal DB indexing (`pack/keyword/pack_keyword/tag_id_map`)
 - `--reset-state` to re-index everything from scratch
 
-Each dataset root must contain a `metadata.json` file with this shape:
+Each dataset root must contain a `ComicInfo.xml` file with this shape:
 
-```json
-{
-  "title": "album title",
-  "tags": ["tagA", "tagB"]
-}
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<ComicInfo>
+  <Title>album title</Title>
+  <Tags>tagA, tagB</Tags>
+  <Web>https://example.com/source</Web>
+</ComicInfo>
 ```
 
-The `title` value is stored in `pack.title`.
-The `tags` values are mapped to `keyword_ids` (DB mappings are used first, and missing tags are auto-added).
+The `Title` value is stored in `pack.title`.
+The `Tags` value is split by comma, trimmed, and mapped to `keyword_ids` (DB mappings are used first, and missing tags are auto-added).
+The `Web` value is stored in `pack.source`; if `Web` is empty, `URL` is used instead.
 The effective mapping is exported to `tag_id_map.json` for review and reuse.
 
 Dataset root discovery rules:
-- for each `--datasets-root`, if `metadata.json` exists in that directory, it is treated as a dataset root
-- first-level subdirectories with `metadata.json` are also auto-discovered as dataset roots
+- for each `--datasets-root`, if `ComicInfo.xml` exists in that directory, it is treated as a dataset root
+- first-level subdirectories with `ComicInfo.xml` are also auto-discovered as dataset roots
 
 ## ORM and DB
 
