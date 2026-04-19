@@ -44,3 +44,14 @@ class PackKeyword(Base):
         UniqueConstraint("pack_id", "keyword_id", name="uq_pack_keyword"),
         Index("idx_pack_keyword_keyword_id", "keyword_id"),
     )
+
+class EHentaiComicInfo(Base):
+    __tablename__ = "ehentai_comic_info"
+
+    gid: Mapped[int] = mapped_column(Integer, nullable=False, primary_key=True)
+    token: Mapped[str] = mapped_column(String, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("gid", "token", name="uq_ehentai_gid_token"),
+        Index("idx_ehentai_gid_token", "gid", "token"),
+    )
