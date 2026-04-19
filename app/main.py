@@ -1,28 +1,60 @@
 from __future__ import annotations
 
 import json
-import os
+import logging
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Callable
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, Path, Query
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Path, Query, UploadFile, status
+from pydantic import BaseModel, HttpUrl
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db import get_db
+from app.config import AppSettings, load_settings
+from app.db import create_db_session, get_db, get_engine, init_db
+from app.ehentai_ingest import EhentaiIngestService
 from app.embedder_onnx import OnnxImageEmbedder
 from app.models import Keyword, Pack, PackKeyword
 from app.search_service import SearchService
+from app.task_manager import TaskManager
 
 
 class _AppRuntime:
     embedder: Any = None
     search_service: Any = None
+    ehentai_ingest_service: Any = None
+    task_manager: TaskManager | None = None
+    task_db_session_factory: Callable[[], Any] | None = None
+    settings: AppSettings | None = None
 
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 ALLOWED_IMAGE_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_KEYWORD_IDS = 20
 INT32_MAX = 2_147_483_647
+logger = logging.getLogger("uvicorn.error")
+
+
+class EhentaiImportRequest(BaseModel):
+    url: HttpUrl
+    crop_faces: bool = True
+
+
+class EhentaiImportTaskSubmitResponse(BaseModel):
+    task_id: str
+    status: str
+
+
+class TaskStatusResponse(BaseModel):
+    task_id: str
+    task_type: str
+    status: str
+    cancel_requested: bool = False
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    result: dict[str, Any] | None = None
+    error: str | None = None
 
 
 def parse_keyword_ids(raw_keyword_ids: str | None) -> list[int]:
@@ -46,40 +78,101 @@ def parse_keyword_ids(raw_keyword_ids: str | None) -> list[int]:
     return keyword_ids
 
 
-def create_app(embedder: Any | None = None, search_service: Any | None = None) -> FastAPI:
+def create_app(
+    config_path: str | None = None,
+    embedder: Any | None = None,
+    search_service: Any | None = None,
+    ehentai_ingest_service: Any | None = None,
+    task_manager: TaskManager | None = None,
+    task_db_session_factory: Callable[[], Any] | None = None,
+) -> FastAPI:
     runtime = _AppRuntime()
     runtime.embedder = embedder
     runtime.search_service = search_service
+    runtime.ehentai_ingest_service = ehentai_ingest_service
+    runtime.task_manager = task_manager
+    runtime.task_db_session_factory = task_db_session_factory or create_db_session
+    runtime.settings = load_settings(config_path)
+
+    from app.db import configure_database
+
+    configure_database(runtime.settings.database.url)
+    init_db()
+
+    if runtime.task_manager is None:
+        task_session_factory = runtime.task_db_session_factory
+        assert task_session_factory is not None
+        runtime.task_manager = TaskManager(task_session_factory, get_engine())
+
+    def _register_ehentai_task_handler() -> None:
+        if runtime.task_manager is None or runtime.ehentai_ingest_service is None:
+            return
+
+        async def _ehentai_import_handler(payload: dict[str, Any], db: Session, should_cancel: Callable[[], bool]) -> dict[str, Any]:
+            return await runtime.ehentai_ingest_service.ingest_url(
+                url=str(payload["url"]),
+                db=db,
+                crop_faces=bool(payload.get("crop_faces", True)),
+                should_cancel=should_cancel,
+            )
+
+        runtime.task_manager.register_handler("ehentai_import", _ehentai_import_handler)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if runtime.embedder is None:
-            model_path = os.getenv("ONNX_MODEL_PATH", "models/clip_image_encoder.onnx")
-            input_size = int(os.getenv("EMBEDDER_INPUT_SIZE", "224"))
-            intra_threads = int(os.getenv("EMBEDDER_INTRA_THREADS", "4"))
             runtime.embedder = OnnxImageEmbedder(
-                onnx_path=model_path,
-                input_size=input_size,
-                intra_threads=intra_threads,
+                onnx_path=runtime.settings.embedder.onnx_path,
+                input_size=runtime.settings.embedder.input_size,
+                intra_threads=runtime.settings.embedder.intra_threads,
             )
 
         if runtime.search_service is None:
             from qdrant_client import QdrantClient
 
-            qdrant_host = os.getenv("QDRANT_HOST", "127.0.0.1")
-            qdrant_port = int(os.getenv("QDRANT_PORT", "6333"))
-            collection_name = os.getenv("QDRANT_COLLECTION", "pages")
-            qdrant = QdrantClient(host=qdrant_host, port=qdrant_port)
-            runtime.search_service = SearchService(qdrant, collection_name=collection_name)
+            qdrant = QdrantClient(host=runtime.settings.qdrant.host, port=runtime.settings.qdrant.port)
+            runtime.search_service = SearchService(qdrant, collection_name=runtime.settings.qdrant.collection)
+
+        if (
+            runtime.ehentai_ingest_service is None
+            and runtime.embedder is not None
+            and runtime.search_service is not None
+            and hasattr(runtime.search_service, "qdrant")
+        ):
+            settings = runtime.settings
+            assert settings is not None
+            runtime.ehentai_ingest_service = EhentaiIngestService(
+                settings=settings,
+                embedder=runtime.embedder,
+                search_service=runtime.search_service,
+            )
+
+        if runtime.task_manager is not None and runtime.ehentai_ingest_service is not None:
+            _register_ehentai_task_handler()
+            runtime.task_manager.resume_unfinished()
         yield
 
     app = FastAPI(title="ComicSearch API", lifespan=lifespan)
     app.state.runtime = runtime
 
+    def _task_record_response(record: Any) -> TaskStatusResponse:
+        return TaskStatusResponse(
+            task_id=record.task_id,
+            task_type=record.task_type,
+            status=record.status,
+            cancel_requested=bool(record.cancel_requested),
+            created_at=record.created_at,
+            started_at=record.started_at,
+            finished_at=record.finished_at,
+            result=record.result if isinstance(record.result, dict) else None,
+            error=record.error,
+        )
+
     def _pack_info_response(pack_id: int, db: Session) -> dict[str, Any]:
-        pack = db.get(Pack, int(pack_id))
-        if pack is None:
+        pack_row = db.execute(select(Pack.pack_id, Pack.title, Pack.source).where(Pack.pack_id == int(pack_id))).one_or_none()
+        if pack_row is None:
             raise HTTPException(status_code=404, detail=f"pack not found: {pack_id}")
+        pack_id_value, pack_title, pack_source = pack_row
 
         rows = (
             db.query(Keyword.id, Keyword.name)
@@ -91,9 +184,9 @@ def create_app(embedder: Any | None = None, search_service: Any | None = None) -
         keywords = [{"id": int(keyword_id), "name": str(keyword_name)} for keyword_id, keyword_name in rows]
 
         return {
-            "pack_id": int(pack.pack_id),
-            "title": pack.title,
-            "source": pack.source,
+            "pack_id": int(pack_id_value),
+            "title": pack_title,
+            "source": pack_source,
             "keyword_ids": [keyword["id"] for keyword in keywords],
             "keywords": keywords,
         }
@@ -102,11 +195,11 @@ def create_app(embedder: Any | None = None, search_service: Any | None = None) -
     async def search(
         image: UploadFile = File(...),
         keyword_ids: str | None = Form(default=None),
-        robust_partial: bool = Form(default=True),
-        include_corners: bool = Form(default=True),
-        include_contrast: bool = Form(default=False),
-        per_view_limit: int = Form(default=80, ge=10, le=300),
-        top_k_manga: int = Form(default=10, ge=1, le=50),
+        robust_partial: bool | None = Form(default=None),
+        include_corners: bool | None = Form(default=None),
+        include_contrast: bool | None = Form(default=None),
+        per_view_limit: int | None = Form(default=None),
+        top_k_manga: int | None = Form(default=None),
     ) -> dict[str, Any]:
         if image.content_type not in ALLOWED_IMAGE_CONTENT_TYPES:
             raise HTTPException(
@@ -128,6 +221,18 @@ def create_app(embedder: Any | None = None, search_service: Any | None = None) -
                 detail=f"invalid keyword_ids '{keyword_ids}': expected JSON int array ({exc})",
             ) from exc
 
+        search_defaults = app.state.runtime.settings.search
+        robust_partial = search_defaults.robust_partial if robust_partial is None else robust_partial
+        include_corners = search_defaults.include_corners if include_corners is None else include_corners
+        include_contrast = search_defaults.include_contrast if include_contrast is None else include_contrast
+        per_view_limit = search_defaults.per_view_limit if per_view_limit is None else int(per_view_limit)
+        top_k_manga = search_defaults.top_k_manga if top_k_manga is None else int(top_k_manga)
+
+        if per_view_limit < 10 or per_view_limit > 300:
+            raise HTTPException(status_code=422, detail="per_view_limit must be in [10, 300]")
+        if top_k_manga < 1 or top_k_manga > 50:
+            raise HTTPException(status_code=422, detail="top_k_manga must be in [1, 50]")
+
         if robust_partial:
             vectors = app.state.runtime.embedder.multi_views(
                 image_bytes,
@@ -137,14 +242,13 @@ def create_app(embedder: Any | None = None, search_service: Any | None = None) -
         else:
             vectors = [app.state.runtime.embedder.embed_bytes(image_bytes)]
 
-
         points = app.state.runtime.search_service.search_pages_multi_view(
             vectors=vectors,
             keyword_ids=parsed_keyword_ids,
-            per_view_limit=int(per_view_limit),
+            per_view_limit=per_view_limit,
         )
 
-        candidate_manga = app.state.runtime.search_service.aggregate_manga(points, top_k=int(top_k_manga))
+        candidate_manga = app.state.runtime.search_service.aggregate_manga(points, top_k=top_k_manga)
         best_manga = candidate_manga[0] if candidate_manga else None
 
         return {
@@ -152,6 +256,61 @@ def create_app(embedder: Any | None = None, search_service: Any | None = None) -
             "confidence": app.state.runtime.search_service.confidence(candidate_manga),
             "candidate_manga": candidate_manga,
         }
+
+    @app.post("/ehentai/import/tasks", status_code=status.HTTP_202_ACCEPTED, response_model=EhentaiImportTaskSubmitResponse)
+    async def submit_ehentai_import_task(payload: EhentaiImportRequest) -> EhentaiImportTaskSubmitResponse:
+        if app.state.runtime.ehentai_ingest_service is None:
+            raise HTTPException(status_code=503, detail="ehentai ingest service is not available")
+
+        manager = app.state.runtime.task_manager
+        if manager is None:
+            raise HTTPException(status_code=503, detail="task manager is not available")
+
+        _register_ehentai_task_handler()
+
+
+        task_id = manager.submit(
+            task_type="ehentai_import",
+            payload={"url": str(payload.url), "crop_faces": bool(payload.crop_faces)},
+        )
+        logger.info("submitted ehentai import task id=%s url=%s crop_faces=%s", task_id, str(payload.url), bool(payload.crop_faces))
+        return EhentaiImportTaskSubmitResponse(task_id=task_id, status="pending")
+
+    @app.get("/tasks/{task_id}", response_model=TaskStatusResponse)
+    async def get_task_status(task_id: str = Path(..., title="Task ID")) -> TaskStatusResponse:
+        manager = app.state.runtime.task_manager
+        if manager is None:
+            raise HTTPException(status_code=503, detail="task manager is not available")
+
+        record = manager.get(task_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
+
+        return _task_record_response(record)
+
+    @app.get("/tasks", response_model=list[TaskStatusResponse])
+    async def list_tasks(
+        limit: int = Query(default=50, ge=1, le=500),
+        status_value: str | None = Query(default=None, alias="status"),
+    ) -> list[TaskStatusResponse]:
+        manager = app.state.runtime.task_manager
+        if manager is None:
+            raise HTTPException(status_code=503, detail="task manager is not available")
+
+        records = manager.list_tasks(limit=int(limit), status_filter=status_value)
+        return [_task_record_response(record) for record in records]
+
+    @app.post("/tasks/{task_id}/cancel", response_model=TaskStatusResponse)
+    async def cancel_task(task_id: str = Path(..., title="Task ID")) -> TaskStatusResponse:
+        manager = app.state.runtime.task_manager
+        if manager is None:
+            raise HTTPException(status_code=503, detail="task manager is not available")
+
+        record = manager.cancel(task_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
+
+        return _task_record_response(record)
 
     @app.get("/info/{id}")
     async def info(

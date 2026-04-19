@@ -40,6 +40,7 @@ class ComicInformation(Generic[T]):
     uploader: str
     uploadTimestamp: int
     size: int | None = None
+    old: T | None = None
 
 @dataclass
 class ArchiveInformation:

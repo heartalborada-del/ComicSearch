@@ -48,10 +48,31 @@ class PackKeyword(Base):
 class EHentaiComicInfo(Base):
     __tablename__ = "ehentai_comic_info"
 
-    gid: Mapped[int] = mapped_column(Integer, nullable=False, primary_key=True)
-    token: Mapped[str] = mapped_column(String, nullable=False)
+    current_gid: Mapped[int] = mapped_column(Integer, nullable=False, primary_key=True)
+    current_token: Mapped[str] = mapped_column(String, nullable=False)
+    old_gid: Mapped[int] = mapped_column(Integer, nullable=False)
+    old_token: Mapped[str] = mapped_column(String, nullable=False)
 
     __table_args__ = (
-        UniqueConstraint("gid", "token", name="uq_ehentai_gid_token"),
-        Index("idx_ehentai_gid_token", "gid", "token"),
+        Index("idx_ehentai_current_gid_token", "current_gid", "current_token"),
+        Index("idx_ehentai_old_gid_token", "old_gid", "old_token"),
+    )
+
+
+class ImportTask(Base):
+    __tablename__ = "import_task"
+
+    task_id: Mapped[str] = mapped_column(String, primary_key=True)
+    task_type: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    payload_json: Mapped[str] = mapped_column(String, nullable=False)
+    result_json: Mapped[str | None] = mapped_column(String, nullable=True)
+    error: Mapped[str | None] = mapped_column(String, nullable=True)
+    cancel_requested: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    started_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    finished_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        Index("idx_import_task_status_created", "status", "created_at"),
     )

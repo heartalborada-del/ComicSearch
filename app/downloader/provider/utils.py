@@ -3,10 +3,10 @@ from bs4 import BeautifulSoup
 
 
 async def precheck_response(res: ClientResponse) -> str:
-    if res.status != 200:
-        raise RuntimeError(f"Invalid status code: {res.status}")
-
     body = await res.text()
+    if res.status != 200:
+        raise RuntimeError(f"Invalid status code: {res.status} for {res.url}")
+
     if not body or not body.strip():
         raise RuntimeError("Failed to load page")
     return body

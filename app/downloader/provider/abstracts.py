@@ -1,7 +1,7 @@
 from abc import abstractmethod, ABC
 from typing import Generic, TypeVar
 
-from downloader.provider.models import ArchiveInformation, ComicInformation
+from app.downloader.provider.models import ArchiveInformation, ComicInformation
 
 T = TypeVar("T")
 

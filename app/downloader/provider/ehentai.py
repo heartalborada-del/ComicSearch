@@ -7,9 +7,9 @@ from aiohttp import ClientHandlerType, ClientRequest, ClientResponse, ClientSess
 import aiohttp
 from bs4 import BeautifulSoup
 
-from downloader.provider.abstracts import AbstractComicProvider
-from downloader.provider.models import ArchiveInformation, ComicInformation, EHGallery
-from downloader.provider.utils import precheck_response
+from app.downloader.provider.abstracts import AbstractComicProvider
+from app.downloader.provider.models import ArchiveInformation, ComicInformation, EHGallery
+from app.downloader.provider.utils import precheck_response
 
 
 def _isCopyrightGallery(document: BeautifulSoup) -> bool:
@@ -93,16 +93,35 @@ class EHentaiProvider(AbstractComicProvider[tuple[str, str]]):
             }) as res:
                 body = await precheck_response(res)
                 payload = json.loads(body)
-                for data in payload["gmetadata"]:
+                metadata_list = payload.get("gmetadata")
+                if not isinstance(metadata_list, list):
+                    raise ValueError(f"Invalid E-Hentai API response for {comic[0]}/{comic[1]}: missing gmetadata")
+
+                for data in metadata_list:
+                    api_error = data.get("error")
+                    if api_error:
+                        raise ValueError(f"E-Hentai API error for {comic[0]}/{comic[1]}: {api_error}")
+                    if "category" not in data:
+                        raise ValueError(
+                            f"Invalid E-Hentai metadata response for {comic[0]}/{comic[1]}: missing category"
+                        )
+
                     gallery = EHGallery.GMetadata.from_json(data)
                     # get latest gallery information
                     if gallery.current_gid is not None and gallery.current_key is not None:
-                        return await self.getComicInformation((str(gallery.first_gid), str(gallery.first_key)))
+                        current_comic = (str(gallery.current_gid), str(gallery.current_key))
+                        if current_comic != (str(comic[0]), str(comic[1])):
+                            return await self.getComicInformation(current_comic)
                     # filter out language and advertisement tags, as they are not useful for searching and may cause issues with some comics that have a large number of tags
                     gallery.tags = [tag for tag in gallery.tags if not (tag.startswith("language:") or tag == "other:extraneous ads")]
+                    if gallery.first_gid is not None and gallery.first_key is not None:
+                        old = (str(gallery.first_gid), str(gallery.first_key))
+                    else:
+                        old = (str(comic[0]), str(comic[1]))
                     # always use the Japanese title if available.
                     return ComicInformation(
-                        id=comic,
+                        id=(str(comic[0]), str(comic[1])),
+                        old=old,
                         title=gallery.title_jpn if gallery.title_jpn else gallery.title,
                         subtitle="",
                         tags=gallery.tags,
@@ -249,7 +268,7 @@ class EHentaiProvider(AbstractComicProvider[tuple[str, str]]):
                 href = str(al[0].get("href", None))
                 if href is None or not urlparse(href).hostname.endswith("hath.network"):
                     raise ValueError("Download link not found")
-                return href
+                return href+"?start=1"
     
     async def __checkLogin(self):
         async with ClientSession(

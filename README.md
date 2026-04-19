@@ -37,6 +37,57 @@ Do not install `onnxruntime-gpu` and `onnxruntime-directml` in the same environm
 
 ## Configuration
 
+You can configure startup parameters with a TOML file.
+
+- Default config file: `config.toml`
+- Copy `config.example.toml` to `config.toml` as a starting point
+- Override config location with `COMICSEARCH_CONFIG=/path/to/config.toml`
+- Environment variables still work and override values from the TOML file
+
+Example `config.toml`:
+
+```toml
+[embedder]
+onnx_path = "models/clip_image_encoder.onnx"
+input_size = 224
+intra_threads = 4
+
+[qdrant]
+host = "127.0.0.1"
+port = 6333
+collection = "pages"
+
+[database]
+url = "sqlite:///./comicsearch.db"
+
+[search_defaults]
+robust_partial = true
+include_corners = true
+include_contrast = false
+per_view_limit = 80
+top_k_manga = 10
+
+[ehentai]
+proxy = "http://127.0.0.1:7890"
+is_exhentai = true
+archive_extract_root = "comics/origin/ehentai"
+allow_archive_fallback = false
+face_crop_model = "models/yolov8n.pt"
+face_crop_device = "cpu"
+face_crop_confidence_threshold = 0.35
+face_crop_expand_ratio = 0.15
+face_crop_min_size = 48
+face_crop_max_detections_per_image = 6
+download_timeout_seconds = 60
+
+[ehentai.cookies]
+ipb_member_id = "your_member_id"
+ipb_pass_hash = "your_pass_hash"
+igneous = "your_igneous"
+sk = "your_sk"
+hath_perks = "your_hath_perks"
+```
+
 Environment variables:
 
 - `ONNX_MODEL_PATH` (default: `models/clip_image_encoder.onnx`)
@@ -46,6 +97,29 @@ Environment variables:
 - `QDRANT_PORT` (default: `6333`)
 - `QDRANT_COLLECTION` (default: `pages`)
 - `DATABASE_URL` (default: `sqlite:///./comicsearch.db`)
+
+Ehentai submission endpoint:
+
+- Async task submission only (see “Async task mode” below)
+- It uses the Ehentai proxy/cookie/crop settings from `[ehentai]` in the TOML config
+- If the same `gid + gallerykey` has already been imported, the endpoint returns `status=duplicate`
+- If the `gallerykey` changed for the same `gid`, the existing record is updated and ingestion continues
+
+Async task mode:
+
+- `POST /ehentai/import/tasks` submits the same JSON body and returns `202` with `task_id`
+- `GET /tasks/{task_id}` returns task status (`pending`, `running`, `success`, `failed`) and result/error
+- `GET /tasks?limit=50&status=running` lists recent tasks with optional status filter
+- `POST /tasks/{task_id}/cancel` requests cancellation for a pending/running task
+- Unfinished tasks (`pending`/`running`) are persisted and resumed automatically after process restart
+
+The `/search` endpoint also reads these optional defaults from `[search_defaults]` in the TOML config when the request omits them:
+
+- `robust_partial`
+- `include_corners`
+- `include_contrast`
+- `per_view_limit`
+- `top_k_manga`
 
 ## Run API
 

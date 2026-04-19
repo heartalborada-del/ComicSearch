@@ -1,0 +1,40 @@
+[embedder]
+onnx_path = "models/clip_image_encoder.onnx"
+input_size = 224
+intra_threads = 4
+
+[qdrant]
+host = "127.0.0.1"
+port = 6333
+collection = "pages"
+
+[database]
+url = "sqlite:///./comicsearch.db"
+
+[search_defaults]
+robust_partial = true
+include_corners = true
+include_contrast = false
+per_view_limit = 80
+top_k_manga = 10
+
+[ehentai]
+proxy = "http://127.0.0.1:7890"
+is_exhentai = true
+archive_extract_root = "comics/origin/ehentai"
+allow_archive_fallback = false
+face_crop_model = "models/yolov8n.pt"
+face_crop_device = "cpu"
+face_crop_confidence_threshold = 0.35
+face_crop_expand_ratio = 0.15
+face_crop_min_size = 48
+face_crop_max_detections_per_image = 6
+download_timeout_seconds = 60
+
+[ehentai.cookies]
+ipb_member_id = "your_member_id"
+ipb_pass_hash = "your_pass_hash"
+igneous = "your_igneous"
+sk = "your_sk"
+hath_perks = "your_hath_perks"
+

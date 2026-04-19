@@ -35,6 +35,57 @@ pip install -r requirements-directml.txt
 
 ## 配置
 
+你可以使用 TOML 配置文件来设置启动参数。
+
+- 默认配置文件：`config.toml`
+- 你可以先复制 `config.example.toml` 为 `config.toml`
+- 可通过 `COMICSEARCH_CONFIG=/path/to/config.toml` 指定配置文件路径
+- 环境变量仍然可用，并且会覆盖 TOML 中的配置
+
+`config.toml` 示例：
+
+```toml
+[embedder]
+onnx_path = "models/clip_image_encoder.onnx"
+input_size = 224
+intra_threads = 4
+
+[qdrant]
+host = "127.0.0.1"
+port = 6333
+collection = "pages"
+
+[database]
+url = "sqlite:///./comicsearch.db"
+
+[search_defaults]
+robust_partial = true
+include_corners = true
+include_contrast = false
+per_view_limit = 80
+top_k_manga = 10
+
+[ehentai]
+proxy = "http://127.0.0.1:7890"
+is_exhentai = true
+archive_extract_root = "comics/origin/ehentai"
+allow_archive_fallback = false
+face_crop_model = "models/yolov8n.pt"
+face_crop_device = "cpu"
+face_crop_confidence_threshold = 0.35
+face_crop_expand_ratio = 0.15
+face_crop_min_size = 48
+face_crop_max_detections_per_image = 6
+download_timeout_seconds = 60
+
+[ehentai.cookies]
+ipb_member_id = "your_member_id"
+ipb_pass_hash = "your_pass_hash"
+igneous = "your_igneous"
+sk = "your_sk"
+hath_perks = "your_hath_perks"
+```
+
 环境变量：
 
 - `ONNX_MODEL_PATH`（默认：`models/clip_image_encoder.onnx`）
@@ -44,6 +95,29 @@ pip install -r requirements-directml.txt
 - `QDRANT_PORT`（默认：`6333`）
 - `QDRANT_COLLECTION`（默认：`pages`）
 - `DATABASE_URL`（默认：`sqlite:///./comicsearch.db`）
+
+Ehentai 提交接口：
+
+- 仅支持异步任务提交（见下方“异步任务模式”）
+- 会使用 TOML 配置中的 `[ehentai]` 段来设置代理、Cookie 和裁切参数
+- 如果相同的 `gid + gallerykey` 已经导入过，会直接返回 `status=duplicate`
+- 如果同一个 `gid` 的 `gallerykey` 发生变化，会更新已有记录并继续导入
+
+异步任务模式：
+
+- `POST /ehentai/import/tasks` 提交同样的 JSON，请求会返回 `202` 和 `task_id`
+- `GET /tasks/{task_id}` 查询任务状态（`pending`、`running`、`success`、`failed`）以及结果/错误
+- `GET /tasks?limit=50&status=running` 查询最近任务列表（可按状态过滤）
+- `POST /tasks/{task_id}/cancel` 对 `pending/running` 任务发起取消
+- 未完成任务（`pending`/`running`）会持久化，服务重启后自动继续执行
+
+如果请求体里没有传这些字段，`/search` 也会读取 TOML 配置中的 `[search_defaults]` 作为默认值：
+
+- `robust_partial`
+- `include_corners`
+- `include_contrast`
+- `per_view_limit`
+- `top_k_manga`
 
 ## 启动 API
 

@@ -6,4 +6,4 @@ comics
 comicsearch.db
 tag_id_map.json
 .cache
-main.py
+config.toml
