@@ -36,13 +36,22 @@ logger = logging.getLogger("uvicorn.error")
 
 
 class EhentaiImportRequest(BaseModel):
-    url: HttpUrl
+    url: HttpUrl | None = None
+    urls: list[HttpUrl] | None = None
     crop_faces: bool = True
 
 
-class EhentaiImportTaskSubmitResponse(BaseModel):
+class EhentaiImportTaskSubmitItemResponse(BaseModel):
+    url: str
     task_id: str
     status: str
+    is_duplicate: bool
+
+
+class EhentaiImportTaskSubmitResponse(BaseModel):
+    task_id: str | None = None
+    status: str | None = None
+    items: list[EhentaiImportTaskSubmitItemResponse]
 
 
 class TaskStatusResponse(BaseModel):
@@ -268,13 +277,45 @@ def create_app(
 
         _register_ehentai_task_handler()
 
+        request_urls: list[str] = []
+        if payload.url is not None:
+            request_urls.append(str(payload.url))
+        if payload.urls is not None:
+            request_urls.extend(str(url) for url in payload.urls)
+        if len(request_urls) == 0:
+            raise HTTPException(status_code=400, detail="either url or urls must be provided")
 
-        task_id = manager.submit(
-            task_type="ehentai_import",
-            payload={"url": str(payload.url), "crop_faces": bool(payload.crop_faces)},
+        items: list[EhentaiImportTaskSubmitItemResponse] = []
+        for request_url in request_urls:
+            submit_result = manager.submit_or_get_existing(
+                task_type="ehentai_import",
+                payload={"url": request_url, "crop_faces": bool(payload.crop_faces)},
+            )
+            is_duplicate = not bool(submit_result.created)
+            response_status = "duplicate" if is_duplicate else submit_result.status
+            logger.info(
+                "submit ehentai import task id=%s status=%s created=%s url=%s crop_faces=%s",
+                submit_result.task_id,
+                response_status,
+                submit_result.created,
+                request_url,
+                bool(payload.crop_faces),
+            )
+            items.append(
+                EhentaiImportTaskSubmitItemResponse(
+                    url=request_url,
+                    task_id=submit_result.task_id,
+                    status=response_status,
+                    is_duplicate=is_duplicate,
+                )
+            )
+
+        first_item = items[0]
+        return EhentaiImportTaskSubmitResponse(
+            task_id=first_item.task_id,
+            status=first_item.status,
+            items=items,
         )
-        logger.info("submitted ehentai import task id=%s url=%s crop_faces=%s", task_id, str(payload.url), bool(payload.crop_faces))
-        return EhentaiImportTaskSubmitResponse(task_id=task_id, status="pending")
 
     @app.get("/tasks/{task_id}", response_model=TaskStatusResponse)
     async def get_task_status(task_id: str = Path(..., title="Task ID")) -> TaskStatusResponse:

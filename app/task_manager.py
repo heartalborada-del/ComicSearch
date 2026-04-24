@@ -33,6 +33,13 @@ class TaskRecord:
     cancel_requested: bool = False
 
 
+@dataclass
+class SubmitResult:
+    task_id: str
+    status: str
+    created: bool
+
+
 class TaskManager:
     def __init__(self, session_factory: Callable[[], Any], engine: Any) -> None:
         self._session_factory = session_factory
@@ -74,6 +81,55 @@ class TaskManager:
 
         self._start_worker(task_id)
         return task_id
+
+    def submit_or_get_existing(
+        self,
+        task_type: str,
+        payload: dict[str, Any],
+        dedup_statuses: tuple[str, ...] = ("pending", "running"),
+    ) -> SubmitResult:
+        task_id: str | None = None
+        status: str | None = None
+        created = False
+
+        with self._lock:
+            with self._session_factory() as db:
+                if dedup_statuses:
+                    rows = (
+                        db.query(ImportTask)
+                        .filter(ImportTask.task_type == task_type)
+                        .filter(ImportTask.status.in_(list(dedup_statuses)))
+                        .order_by(ImportTask.created_at.desc())
+                        .all()
+                    )
+                    for row in rows:
+                        row_payload = self._loads_json(row.payload_json) or {}
+                        if row_payload == payload:
+                            task_id = row.task_id
+                            status = row.status
+                            created = False
+                            break
+
+                if task_id is None:
+                    task_id = uuid4().hex
+                    status = "pending"
+                    created = True
+                    db.add(
+                        ImportTask(
+                            task_id=task_id,
+                            task_type=task_type,
+                            status="pending",
+                            payload_json=json.dumps(payload, ensure_ascii=False),
+                            created_at=self._now_iso(),
+                        )
+                    )
+                    db.commit()
+
+        assert task_id is not None
+        assert status is not None
+        if created:
+            self._start_worker(task_id)
+        return SubmitResult(task_id=task_id, status=status, created=created)
 
     def _start_worker(self, task_id: str) -> None:
         with self._lock:

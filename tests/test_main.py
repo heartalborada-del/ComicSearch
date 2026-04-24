@@ -359,6 +359,124 @@ class EhentaiImportEndpointTests(unittest.TestCase):
         response = client.get("/tasks/not_exists")
         self.assertEqual(response.status_code, 404)
 
+    def test_submit_same_payload_reuses_active_task(self):
+        started = threading.Event()
+        release = threading.Event()
+        calls: list[str] = []
+
+        async def _ingest_url(url: str, db, crop_faces: bool, should_cancel=None):
+            _ = db, crop_faces, should_cancel
+            calls.append(url)
+            started.set()
+            while not release.is_set():
+                await asyncio.sleep(0.01)
+            return {"status": "ok", "source": url}
+
+        embedder = SimpleNamespace(
+            multi_views=lambda image_bytes, include_corners, include_contrast: [[0.1]],
+            embed_bytes=lambda image_bytes: [0.1],
+        )
+        search_service = SimpleNamespace(
+            qdrant=SimpleNamespace(upsert=lambda **kwargs: None),
+            collection_name="pages",
+            search_pages_multi_view=lambda vectors, keyword_ids, per_view_limit: [],
+            aggregate_manga=lambda points, top_k: [],
+            aggregate_packs_for_manga=lambda points, pack_id, top_k: [],
+            confidence=lambda candidates: "low",
+        )
+        ingest_service = SimpleNamespace(ingest_url=_ingest_url)
+        app = create_app(embedder=embedder, search_service=search_service, ehentai_ingest_service=ingest_service)
+        client = TestClient(app)
+
+        first = client.post(
+            "/ehentai/import/tasks",
+            json={"url": "https://e-hentai.org/g/333/ghi/", "crop_faces": True},
+        )
+        self.assertEqual(first.status_code, 202)
+        first_payload = first.json()
+        self.assertEqual(first_payload["status"], "pending")
+        self.assertTrue(started.wait(timeout=1.0))
+
+        second = client.post(
+            "/ehentai/import/tasks",
+            json={"url": "https://e-hentai.org/g/333/ghi/", "crop_faces": True},
+        )
+        self.assertEqual(second.status_code, 202)
+        second_payload = second.json()
+
+        self.assertEqual(second_payload["task_id"], first_payload["task_id"])
+        self.assertEqual(second_payload["status"], "duplicate")
+        self.assertEqual(len(calls), 1)
+
+        release.set()
+
+    def test_submit_multiple_urls_returns_ordered_items_with_duplicate_flag(self):
+        started = threading.Event()
+        release = threading.Event()
+        calls: list[str] = []
+
+        async def _ingest_url(url: str, db, crop_faces: bool, should_cancel=None):
+            _ = db, crop_faces, should_cancel
+            calls.append(url)
+            started.set()
+            while not release.is_set():
+                await asyncio.sleep(0.01)
+            return {"status": "ok", "source": url}
+
+        embedder = SimpleNamespace(
+            multi_views=lambda image_bytes, include_corners, include_contrast: [[0.1]],
+            embed_bytes=lambda image_bytes: [0.1],
+        )
+        search_service = SimpleNamespace(
+            qdrant=SimpleNamespace(upsert=lambda **kwargs: None),
+            collection_name="pages",
+            search_pages_multi_view=lambda vectors, keyword_ids, per_view_limit: [],
+            aggregate_manga=lambda points, top_k: [],
+            aggregate_packs_for_manga=lambda points, pack_id, top_k: [],
+            confidence=lambda candidates: "low",
+        )
+        ingest_service = SimpleNamespace(ingest_url=_ingest_url)
+        app = create_app(embedder=embedder, search_service=search_service, ehentai_ingest_service=ingest_service)
+        client = TestClient(app)
+
+        unique_suffix = str(time.time_ns())
+        first_url = f"https://e-hentai.org/g/444{unique_suffix}/jkl/"
+        second_url = f"https://e-hentai.org/g/555{unique_suffix}/mno/"
+
+        response = client.post(
+            "/ehentai/import/tasks",
+            json={
+                "urls": [
+                    first_url,
+                    second_url,
+                    first_url,
+                ],
+                "crop_faces": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertIn("items", payload)
+        items = payload["items"]
+        self.assertEqual(len(items), 3)
+        self.assertEqual(items[0]["url"], first_url)
+        self.assertEqual(items[1]["url"], second_url)
+        self.assertEqual(items[2]["url"], first_url)
+        self.assertFalse(items[0]["is_duplicate"])
+        self.assertFalse(items[1]["is_duplicate"])
+        self.assertTrue(items[2]["is_duplicate"])
+        self.assertEqual(items[2]["task_id"], items[0]["task_id"])
+        self.assertEqual(items[2]["status"], "duplicate")
+
+        self.assertTrue(started.wait(timeout=1.0))
+        for _ in range(80):
+            if len(calls) >= 2:
+                break
+            time.sleep(0.01)
+        self.assertEqual(len(calls), 2)
+        release.set()
+
 
 class EhentaiIngestServiceTests(unittest.TestCase):
     def setUp(self):
