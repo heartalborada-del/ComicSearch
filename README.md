@@ -105,6 +105,20 @@ Ehentai submission endpoint:
 - If the same `gid + gallerykey` has already been imported, the endpoint returns `status=duplicate`
 - If the `gallerykey` changed for the same `gid`, the existing record is updated and ingestion continues
 
+Duplicate/update decision logic (simplified):
+
+- Duplicate:
+  - `existing_gallery is not None and existing_gallery.current_token == resolved_token and existing_gallery.current_gid == resolved_gid`
+- Gallery key updated (same `gid`, different key):
+  - `existing_gallery is not None and existing_gallery.current_token != resolved_token`
+- New gallery:
+  - `existing_gallery is None`
+
+Notes:
+
+- `existing_gallery` is loaded by `resolved_gid` primary key, so `current_gid == resolved_gid` is normally already guaranteed when `existing_gallery` is not `None`.
+- The duplicate branch returns early with `status=duplicate`; the update branch cleans old points/datasets for this `gid` and then continues ingestion.
+
 Async task mode:
 
 - `POST /ehentai/import/tasks` submits the same JSON body and returns `202` with `task_id`

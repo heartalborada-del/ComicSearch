@@ -103,6 +103,20 @@ Ehentai 提交接口：
 - 如果相同的 `gid + gallerykey` 已经导入过，会直接返回 `status=duplicate`
 - 如果同一个 `gid` 的 `gallerykey` 发生变化，会更新已有记录并继续导入
 
+判重/更新逻辑（简化版）：
+
+- 判重：
+  - `existing_gallery is not None and existing_gallery.current_token == resolved_token and existing_gallery.current_gid == resolved_gid`
+- gallery key 更新（同 `gid`、不同 key）：
+  - `existing_gallery is not None and existing_gallery.current_token != resolved_token`
+- 新画廊：
+  - `existing_gallery is None`
+
+说明：
+
+- `existing_gallery` 是通过 `resolved_gid` 主键读取的，所以当 `existing_gallery is not None` 时，`current_gid == resolved_gid` 通常已天然成立。
+- 判重分支会直接返回 `status=duplicate`；更新分支会先清理该 `gid` 的旧向量点和旧数据目录，再继续导入。
+
 异步任务模式：
 
 - `POST /ehentai/import/tasks` 提交同样的 JSON，请求会返回 `202` 和 `task_id`
