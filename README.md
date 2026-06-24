@@ -203,6 +203,57 @@ Then visit `http://localhost:8000` — both API and frontend are served from the
 
 To disable (e.g. for development with `npm run dev`), set `enabled = false`.
 
+### Nginx Deployment (Frontend + Backend Separate)
+
+For production with Nginx serving the frontend and reverse-proxying the API:
+
+1. Build the frontend:
+
+```bash
+cd frontend && npm run build
+```
+
+2. Copy `frontend/dist/` to your server (e.g. `/var/www/comicsearch`)
+
+3. Use the provided Nginx config template (`frontend/nginx.conf.example`):
+
+```nginx
+server {
+    listen 80;
+    server_name your-domain.com;
+    root /var/www/comicsearch;
+    index index.html;
+
+    # Static assets with long cache (Vite content-hash filenames)
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # API proxy
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        client_max_body_size 12m;
+    }
+
+    # SPA fallback — critical for /tasks, /info/123 etc. to work on refresh
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+```
+
+The key line is `try_files $uri $uri/ /index.html;` — it ensures that any route
+not matching a real file (like `/tasks`, `/info/123`) falls back to `index.html`,
+so the Vue Router can handle the path client-side. Without this, refreshing
+`/tasks` would return 404 because Nginx looks for a file at that path.
+
+Set `frontend.enabled = false` in `config.toml` when using Nginx, since Nginx
+handles static file serving instead of FastAPI.
+
 ### Environment Variables
 
 Create `.env.development` and `.env.production` in `frontend/`:

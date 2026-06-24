@@ -201,6 +201,56 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 如需禁用（例如开发时使用 `npm run dev`），设置 `enabled = false`。
 
+### Nginx 部署（前后端分离）
+
+生产环境中使用 Nginx 托管前端并反向代理 API：
+
+1. 构建前端：
+
+```bash
+cd frontend && npm run build
+```
+
+2. 将 `frontend/dist/` 复制到服务器（例如 `/var/www/comicsearch`）
+
+3. 使用提供的 Nginx 配置模板（`frontend/nginx.conf.example`）：
+
+```nginx
+server {
+    listen 80;
+    server_name your-domain.com;
+    root /var/www/comicsearch;
+    index index.html;
+
+    # 静态资源长期缓存（Vite 使用内容哈希文件名）
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # API 反向代理
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        client_max_body_size 12m;
+    }
+
+    # SPA 回退——确保 /tasks、/info/123 等路由刷新后正常打开
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+```
+
+关键配置是 `try_files $uri $uri/ /index.html;`——它确保所有不匹配实际文件的
+路由（如 `/tasks`、`/info/123`）回退到 `index.html`，由 Vue Router 在客户端处理路径。
+没有这行配置，刷新 `/tasks` 会返回 404，因为 Nginx 会按文件路径查找。
+
+使用 Nginx 时在 `config.toml` 中设置 `frontend.enabled = false`，因为静态文件
+由 Nginx 托管而非 FastAPI。
+
 ### 环境变量
 
 在 `frontend/` 目录下创建 `.env.development` 和 `.env.production`：

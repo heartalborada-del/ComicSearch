@@ -1,0 +1,58 @@
+# ComicSearch frontend — Nginx configuration template
+#
+# Usage:
+#   1. Build frontend: cd frontend && npm run build
+#   2. Copy frontend/dist to your server (e.g. /var/www/comicsearch)
+#   3. Copy this file to /etc/nginx/sites-available/comicsearch
+#   4. Symlink: ln -s /etc/nginx/sites-available/comicsearch /etc/nginx/sites-enabled/
+#   5. Test: nginx -t && systemctl reload nginx
+
+server {
+    listen 80;
+    server_name your-domain.com;
+
+    # Frontend static files
+    root /var/www/comicsearch;
+    index index.html;
+
+    # Gzip compression
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml image/svg+xml;
+    gzip_min_length 1024;
+
+    # Static assets with long cache (Vite uses content-hash filenames)
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    # API proxy — forward /api/ requests to the backend
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Allow large uploads (image search: up to 10MB)
+        client_max_body_size 12m;
+
+        # WebSocket support (if needed for future features)
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    # SPA fallback — all non-file, non-API routes serve index.html
+    # This ensures /tasks, /info/123, /import etc. work on direct access/refresh
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Cache index.html briefly (not too long, so updates propagate)
+    location = /index.html {
+        expires 5m;
+        add_header Cache-Control "public, max-age=300";
+    }
+}
