@@ -4,6 +4,7 @@
 - SQLAlchemy ORM（`pack`、`keyword`、`pack_keyword`、`tag_id_map`）
 - ONNXRuntime 图像向量（优先 CPU，CLIP 风格预处理）
 - Qdrant 向量检索（支持关键词 AND 过滤与漫画级聚合排序）
+- Vue 3 + Vuetify 3 前端（Material You 设计，多端适配）
 
 ## 环境要求
 
@@ -49,6 +50,9 @@ pip install -r requirements-directml.txt
 onnx_path = "models/clip_image_encoder.onnx"
 input_size = 224
 intra_threads = 4
+
+[cors]
+allow_origins = ["*"]
 
 [qdrant]
 host = "127.0.0.1"
@@ -119,10 +123,10 @@ Ehentai 提交接口：
 
 异步任务模式：
 
-- `POST /ehentai/import/tasks` 提交同样的 JSON，请求会返回 `202` 和 `task_id`
-- `GET /tasks/{task_id}` 查询任务状态（`pending`、`running`、`success`、`failed`）以及结果/错误
-- `GET /tasks?limit=50&status=running` 查询最近任务列表（可按状态过滤）
-- `POST /tasks/{task_id}/cancel` 对 `pending/running` 任务发起取消
+- `POST /api/ehentai/import/tasks` 提交同样的 JSON，请求会返回 `202` 和 `task_id`
+- `GET /api/tasks/{task_id}` 查询任务状态（`pending`、`running`、`success`、`failed`）以及结果/错误
+- `GET /api/tasks?limit=50&status=running` 查询最近任务列表（可按状态过滤）
+- `POST /api/tasks/{task_id}/cancel` 对 `pending/running` 任务发起取消
 - 未完成任务（`pending`/`running`）会持久化，服务重启后自动继续执行
 
 如果请求体里没有传这些字段，`/search` 也会读取 TOML 配置中的 `[search_defaults]` 作为默认值：
@@ -139,9 +143,96 @@ Ehentai 提交接口：
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
+CORS 默认开启（`allow_origins = ["*"]`）。可在 `config.toml` 的 `[cors]` 段配置允许的来源。
+
+## 前端
+
+基于 Vue 3 + Vuetify 3 的前端，采用 Material You（Material Design 3）设计语言，支持手机、平板、桌面多端适配。
+
+### 技术栈
+
+- Vue 3（Composition API，`<script setup>`）
+- Vuetify 3（M3 主题、tonal elevation、响应式导航）
+- TypeScript
+- Vite
+- Pinia（状态管理）
+- Vue Router
+- 原生 `fetch`（不使用 axios）
+
+### 前端安装
+
+```bash
+cd frontend
+npm install
+npm run dev         # 开发服务器（http://localhost:3000）
+npm run build       # 生产构建
+npm run preview     # 预览构建产物
+npm run type-check  # TypeScript 类型检查
+npm run lint        # ESLint 检查
+```
+
+### 自动构建与一体化部署
+
+后端可以自动构建并托管前端——无需单独启动开发服务器。
+
+在 `config.toml` 中配置：
+
+```toml
+[frontend]
+enabled = true       # 由 FastAPI 托管前端
+dist_dir = "frontend/dist"  # 构建产物目录
+auto_build = true    # dist 不存在时自动执行 `npm install && npm run build`
+source_dir = "frontend"    # 前端源码目录
+```
+
+当 `enabled = true` 且 `auto_build = true` 时，后端会：
+1. 检查 `frontend/dist/index.html` 是否存在
+2. 若不存在，自动执行 `npm install` 然后 `npm run build`
+3. 挂载构建产物，与 API 同源提供服务
+4. SPA 路由（如 `/`、`/info/1`、`/tasks`）通过 `index.html` 回退提供服务
+
+因此只需一条命令即可启动全部服务：
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+然后访问 `http://localhost:8000`——API 和前端从同一端口提供服务。
+
+如需禁用（例如开发时使用 `npm run dev`），设置 `enabled = false`。
+
+### 环境变量
+
+在 `frontend/` 目录下创建 `.env.development` 和 `.env.production`：
+
+- `VITE_API_BASE_URL` — API 基地址（开发环境为 `/api`，通过 Vite 代理转发到 `http://localhost:8000`）
+- `VITE_IMAGE_BASE_URL` — 外部图片服务器基地址，用于拼接封面缩略图和页面预览
+
+### 页面
+
+| 路由 | 页面 | 说明 |
+|------|------|------|
+| `/` | 搜索 | 上传图片以图搜漫 |
+| `/info/:id` | 详情 | 查看图包元数据、关键词、封面 |
+| `/import` | 导入 | 提交 E-Hentai URL 进行异步导入 |
+| `/tasks` | 任务 | 查看、过滤、取消异步任务 |
+
+### 响应式设计
+
+- **移动端**（`<960px`）：底部导航栏，单列栅格
+- **平板**（`960px`+）：侧边栏导航（rail 模式），2-3 列栅格
+- **桌面**（`1280px`+）：可折叠侧边栏，3-4 列栅格
+- 触摸友好：最小点击区域 44×44px，移动端不依赖 hover 逻辑
+
+### 主题
+
+- Material You（M3）色板系统，支持亮色/暗色主题
+- 主题切换持久化到 `localStorage`
+- 首次访问时跟随系统偏好
+
 ## `/search` 接口
 
-`POST /search`（`multipart/form-data`）
+`POST /api/search`（`multipart/form-data`）
 
 字段：
 - `image`：上传图片文件
@@ -172,8 +263,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 ## `/info` 接口
 
 支持两种形式：
-- `GET /info/{id}`
-- `GET /info?id=123`
+- `GET /api/info/{id}`
+- `GET /api/info?id=123`
 
 用于按 `pack_id` 查询图包信息。
 

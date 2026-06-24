@@ -7,3 +7,9 @@ comicsearch.db
 tag_id_map.json
 .cache
 config.toml
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+frontend/.env.*.local

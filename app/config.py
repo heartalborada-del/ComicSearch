@@ -58,12 +58,27 @@ class EhentaiSettings:
 
 
 @dataclass(frozen=True)
+class CorsSettings:
+    allow_origins: list[str] = field(default_factory=lambda: ["*"])
+
+
+@dataclass(frozen=True)
+class FrontendSettings:
+    enabled: bool = True
+    dist_dir: str = "frontend/dist"
+    auto_build: bool = True
+    source_dir: str = "frontend"
+
+
+@dataclass(frozen=True)
 class AppSettings:
     embedder: EmbedderSettings = field(default_factory=EmbedderSettings)
     qdrant: QdrantSettings = field(default_factory=QdrantSettings)
     database: DatabaseSettings = field(default_factory=DatabaseSettings)
     search: SearchDefaults = field(default_factory=SearchDefaults)
     ehentai: EhentaiSettings = field(default_factory=EhentaiSettings)
+    cors: CorsSettings = field(default_factory=CorsSettings)
+    frontend: FrontendSettings = field(default_factory=FrontendSettings)
 
 
 def _coerce_bool(value: Any, *, field_name: str) -> bool:
@@ -180,6 +195,8 @@ def load_settings(config_path: str | os.PathLike[str] | None = None) -> AppSetti
     database_section = _get_section(file_data, "database")
     search_section = _get_section(file_data, "search_defaults")
     ehentai_section = _get_section(file_data, "ehentai")
+    cors_section = _get_section(file_data, "cors")
+    frontend_section = _get_section(file_data, "frontend")
 
     embedder = EmbedderSettings(
         onnx_path=_resolve_relative_path(
@@ -287,4 +304,26 @@ def load_settings(config_path: str | os.PathLike[str] | None = None) -> AppSetti
     if database_url:
         database = DatabaseSettings(url=_coerce_str(database_url, field_name="DATABASE_URL"))
 
-    return AppSettings(embedder=embedder, qdrant=qdrant, database=database, search=search, ehentai=ehentai)
+    cors_allow_origins_raw = cors_section.get("allow_origins", ["*"])
+    if isinstance(cors_allow_origins_raw, str):
+        cors_allow_origins = [cors_allow_origins_raw]
+    elif isinstance(cors_allow_origins_raw, list):
+        cors_allow_origins = [str(item) for item in cors_allow_origins_raw]
+    else:
+        cors_allow_origins = ["*"]
+    cors = CorsSettings(allow_origins=cors_allow_origins)
+
+    frontend = FrontendSettings(
+        enabled=_coerce_bool(frontend_section.get("enabled", True), field_name="frontend.enabled"),
+        dist_dir=_resolve_relative_path(
+            _coerce_str(frontend_section.get("dist_dir", "frontend/dist"), field_name="frontend.dist_dir"),
+            base_dir=base_dir,
+        ),
+        auto_build=_coerce_bool(frontend_section.get("auto_build", True), field_name="frontend.auto_build"),
+        source_dir=_resolve_relative_path(
+            _coerce_str(frontend_section.get("source_dir", "frontend"), field_name="frontend.source_dir"),
+            base_dir=base_dir,
+        ),
+    )
+
+    return AppSettings(embedder=embedder, qdrant=qdrant, database=database, search=search, ehentai=ehentai, cors=cors, frontend=frontend)

@@ -3,6 +3,15 @@ onnx_path = "models/clip_image_encoder.onnx"
 input_size = 224
 intra_threads = 4
 
+[cors]
+allow_origins = ["*"]
+
+[frontend]
+enabled = true
+dist_dir = "frontend/dist"
+auto_build = true
+source_dir = "frontend"
+
 [qdrant]
 host = "127.0.0.1"
 port = 6333
@@ -37,4 +46,3 @@ ipb_pass_hash = "your_pass_hash"
 igneous = "your_igneous"
 sk = "your_sk"
 hath_perks = "your_hath_perks"
-

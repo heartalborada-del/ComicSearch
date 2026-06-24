@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
+import subprocess
 from contextlib import asynccontextmanager
+from pathlib import Path as FilePath
 from typing import Any, Callable
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Path, Query, UploadFile, status
+from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Path, Query, Request, UploadFile, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, HttpUrl
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -17,6 +23,44 @@ from app.embedder_onnx import OnnxImageEmbedder
 from app.models import Keyword, Pack, PackKeyword
 from app.search_service import SearchService
 from app.task_manager import TaskManager
+
+
+def _build_frontend(source_dir: FilePath, dist_dir: FilePath) -> bool:
+    """Build the frontend if npm is available and source exists.
+
+    Returns True if the dist directory is ready after this call.
+    """
+    if dist_dir.exists() and (dist_dir / "index.html").exists():
+        return True
+
+    if not source_dir.exists() or not (source_dir / "package.json").exists():
+        logger.warning("frontend source not found at %s, skipping build", source_dir)
+        return False
+
+    npm_cmd = shutil.which("npm") or shutil.which("npm.cmd")
+    if npm_cmd is None:
+        logger.warning("npm not found in PATH, cannot auto-build frontend")
+        return False
+
+    node_modules = source_dir / "node_modules"
+    if not node_modules.exists():
+        logger.info("installing frontend dependencies...")
+        install_result = subprocess.run(
+            [npm_cmd, "install"], cwd=str(source_dir), capture_output=True, text=True, timeout=300,
+        )
+        if install_result.returncode != 0:
+            logger.error("npm install failed:\n%s", install_result.stderr)
+            return False
+
+    logger.info("building frontend...")
+    build_result = subprocess.run(
+        [npm_cmd, "run", "build"], cwd=str(source_dir), capture_output=True, text=True, timeout=300,
+    )
+    if build_result.returncode != 0:
+        logger.error("npm run build failed:\n%s", build_result.stderr)
+        return False
+
+    return dist_dir.exists() and (dist_dir / "index.html").exists()
 
 
 class _AppRuntime:
@@ -164,6 +208,24 @@ def create_app(
     app = FastAPI(title="ComicSearch API", lifespan=lifespan)
     app.state.runtime = runtime
 
+    # API routes are mounted under /api prefix via a router.
+    api_router = APIRouter(prefix="/api")
+
+    # CORS middleware — allows frontend (dev or production) to access the API.
+    # In development, Vite proxy handles cross-origin; in production, this
+    # middleware allows configured origins. Defaults to permissive settings.
+    cors_settings = getattr(runtime.settings, "cors", None)
+    allow_origins = ["*"]
+    if cors_settings is not None:
+        allow_origins = list(getattr(cors_settings, "allow_origins", ["*"]) or ["*"])
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allow_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     def _task_record_response(record: Any) -> TaskStatusResponse:
         return TaskStatusResponse(
             task_id=record.task_id,
@@ -200,7 +262,7 @@ def create_app(
             "keywords": keywords,
         }
 
-    @app.post("/search")
+    @api_router.post("/search")
     async def search(
         image: UploadFile = File(...),
         keyword_ids: str | None = Form(default=None),
@@ -266,7 +328,7 @@ def create_app(
             "candidate_manga": candidate_manga,
         }
 
-    @app.post("/ehentai/import/tasks", status_code=status.HTTP_202_ACCEPTED, response_model=EhentaiImportTaskSubmitResponse)
+    @api_router.post("/ehentai/import/tasks", status_code=status.HTTP_202_ACCEPTED, response_model=EhentaiImportTaskSubmitResponse)
     async def submit_ehentai_import_task(payload: EhentaiImportRequest) -> EhentaiImportTaskSubmitResponse:
         if app.state.runtime.ehentai_ingest_service is None:
             raise HTTPException(status_code=503, detail="ehentai ingest service is not available")
@@ -317,7 +379,7 @@ def create_app(
             items=items,
         )
 
-    @app.get("/tasks/{task_id}", response_model=TaskStatusResponse)
+    @api_router.get("/tasks/{task_id}", response_model=TaskStatusResponse)
     async def get_task_status(task_id: str = Path(..., title="Task ID")) -> TaskStatusResponse:
         manager = app.state.runtime.task_manager
         if manager is None:
@@ -329,7 +391,7 @@ def create_app(
 
         return _task_record_response(record)
 
-    @app.get("/tasks", response_model=list[TaskStatusResponse])
+    @api_router.get("/tasks", response_model=list[TaskStatusResponse])
     async def list_tasks(
         limit: int = Query(default=50, ge=1, le=500),
         status_value: str | None = Query(default=None, alias="status"),
@@ -341,7 +403,7 @@ def create_app(
         records = manager.list_tasks(limit=int(limit), status_filter=status_value)
         return [_task_record_response(record) for record in records]
 
-    @app.post("/tasks/{task_id}/cancel", response_model=TaskStatusResponse)
+    @api_router.post("/tasks/{task_id}/cancel", response_model=TaskStatusResponse)
     async def cancel_task(task_id: str = Path(..., title="Task ID")) -> TaskStatusResponse:
         manager = app.state.runtime.task_manager
         if manager is None:
@@ -353,19 +415,75 @@ def create_app(
 
         return _task_record_response(record)
 
-    @app.get("/info/{id}")
+    @api_router.get("/info/{id}")
     async def info(
         id: int = Path(..., title="Pack ID"),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
         return _pack_info_response(pack_id=int(id), db=db)
 
-    @app.get("/info")
+    @api_router.get("/info")
     async def info_by_query(
         id: int = Query(..., title="Pack ID"),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
         return _pack_info_response(pack_id=int(id), db=db)
+
+    # Include API router with /api prefix
+    app.include_router(api_router)
+
+    # --- Frontend static file serving ---
+    frontend_settings = runtime.settings.frontend
+    if frontend_settings.enabled:
+        dist_dir = FilePath(frontend_settings.dist_dir)
+        source_dir = FilePath(frontend_settings.source_dir)
+
+        dist_ready = dist_dir.exists() and (dist_dir / "index.html").exists()
+        if not dist_ready and frontend_settings.auto_build:
+            dist_ready = _build_frontend(source_dir, dist_dir)
+
+        if dist_ready:
+            index_html = dist_dir / "index.html"
+            assets_dir = dist_dir / "assets"
+            if assets_dir.exists():
+                app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="frontend-assets")
+
+            # Serve other static files at root level (favicon, etc.)
+            for static_file in dist_dir.iterdir():
+                if static_file.is_file() and static_file.name != "index.html":
+                    static_name = static_file.name
+
+                    def _make_static_response(filepath: FilePath) -> Callable[..., Any]:
+                        async def _serve() -> FileResponse:
+                            return FileResponse(str(filepath))
+                        return _serve
+
+                    app.add_api_route(f"/{static_name}", _make_static_response(static_file), methods=["GET"])
+
+            # SPA middleware: intercept browser navigation requests (Accept: text/html)
+            # and serve index.html, while letting API calls (Accept: application/json)
+            # pass through to the API routes.
+            @app.middleware("http")
+            async def spa_middleware(request: Request, call_next: Callable[..., Any]) -> Any:
+                accept = request.headers.get("accept", "")
+                # Only intercept browser navigation (not API calls, not static assets)
+                if "text/html" in accept and not request.url.path.startswith("/assets") and not request.url.path.startswith("/api"):
+                    # Check if it's a static file request first
+                    candidate = dist_dir / request.url.path.lstrip("/")
+                    if candidate.is_file():
+                        return FileResponse(str(candidate))
+                    # SPA fallback: serve index.html for all browser navigation
+                    return FileResponse(str(index_html))
+                return await call_next(request)
+
+            logger.info("frontend served from %s", dist_dir)
+        else:
+            logger.warning(
+                "frontend enabled but dist not ready at %s "
+                "(auto_build=%s); frontend will not be served",
+                dist_dir,
+                frontend_settings.auto_build,
+            )
 
     return app
 

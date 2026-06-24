@@ -1,0 +1,110 @@
+/**
+ * Global styles for Material You (M3) design language.
+ * Uses Vuetify theme variables — no hardcoded color values.
+ */
+
+/* Smooth scrolling and base resets */
+html {
+    scroll-behavior: smooth;
+}
+
+body {
+    margin: 0;
+    font-family: 'Roboto', 'Noto Sans SC', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+/* M3 tonal elevation utility — uses surface-container colors */
+.tonal-elevation-1 {
+    background: rgb(var(--v-theme-surface-container));
+}
+
+.tonal-elevation-2 {
+    background: rgb(var(--v-theme-surface-container-high));
+}
+
+.tonal-elevation-3 {
+    background: rgb(var(--v-theme-surface-container-highest));
+}
+
+/* M3 state-layer hover effect for interactive surfaces */
+.state-layer {
+    position: relative;
+    overflow: hidden;
+}
+
+.state-layer::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: currentColor;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    pointer-events: none;
+}
+
+.state-layer:hover::after {
+    opacity: 0.08;
+}
+
+.state-layer:active::after {
+    opacity: 0.12;
+}
+
+/* Page transition animations */
+.fade-transition-enter-active,
+.fade-transition-leave-active {
+    transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+.fade-transition-enter-from {
+    opacity: 0;
+    transform: translateY(8px);
+}
+
+.fade-transition-leave-to {
+    opacity: 0;
+    transform: translateY(-8px);
+}
+
+/* Ensure touch targets meet 44x44px minimum on mobile */
+@media (max-width: 600px) {
+    .v-btn {
+        min-height: 44px;
+        min-width: 44px;
+    }
+
+    .v-list-item {
+        min-height: 56px;
+    }
+
+    .v-bottom-navigation .v-btn {
+        min-height: 56px;
+    }
+}
+
+/* Prevent layout shift for images */
+.v-img {
+    font-size: 0;
+}
+
+/* Custom scrollbar — M3 styled */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: rgb(var(--v-theme-surface-container));
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgb(var(--v-theme-outline-variant));
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgb(var(--v-theme-outline));
+}

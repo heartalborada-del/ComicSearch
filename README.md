@@ -4,6 +4,7 @@ FastAPI-based manga/comic image search backend with:
 - SQLAlchemy ORM (`pack`, `keyword`, `pack_keyword`, `tag_id_map`)
 - ONNXRuntime image embeddings (CPU-first, CLIP-style preprocessing)
 - Qdrant vector retrieval with AND keyword filtering and manga-level ranking
+- Vue 3 + Vuetify 3 frontend (Material You design, responsive)
 
 中文说明请查看：[README.zh-CN.md](README.zh-CN.md)
 
@@ -51,6 +52,9 @@ Example `config.toml`:
 onnx_path = "models/clip_image_encoder.onnx"
 input_size = 224
 intra_threads = 4
+
+[cors]
+allow_origins = ["*"]
 
 [qdrant]
 host = "127.0.0.1"
@@ -121,10 +125,10 @@ Notes:
 
 Async task mode:
 
-- `POST /ehentai/import/tasks` submits the same JSON body and returns `202` with `task_id`
-- `GET /tasks/{task_id}` returns task status (`pending`, `running`, `success`, `failed`) and result/error
-- `GET /tasks?limit=50&status=running` lists recent tasks with optional status filter
-- `POST /tasks/{task_id}/cancel` requests cancellation for a pending/running task
+- `POST /api/ehentai/import/tasks` submits the same JSON body and returns `202` with `task_id`
+- `GET /api/tasks/{task_id}` returns task status (`pending`, `running`, `success`, `failed`) and result/error
+- `GET /api/tasks?limit=50&status=running` lists recent tasks with optional status filter
+- `POST /api/tasks/{task_id}/cancel` requests cancellation for a pending/running task
 - Unfinished tasks (`pending`/`running`) are persisted and resumed automatically after process restart
 
 The `/search` endpoint also reads these optional defaults from `[search_defaults]` in the TOML config when the request omits them:
@@ -141,9 +145,96 @@ The `/search` endpoint also reads these optional defaults from `[search_defaults
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
+CORS is enabled by default (`allow_origins = ["*"]`). Configure allowed origins in `[cors]` section of `config.toml`.
+
+## Frontend
+
+A Vue 3 + Vuetify 3 frontend with Material You (Material Design 3) design language, supporting mobile, tablet, and desktop.
+
+### Tech Stack
+
+- Vue 3 (Composition API, `<script setup>`)
+- Vuetify 3 (M3 themes, tonal elevation, responsive navigation)
+- TypeScript
+- Vite
+- Pinia (state management)
+- Vue Router
+- Native `fetch` (no axios)
+
+### Frontend Setup
+
+```bash
+cd frontend
+npm install
+npm run dev         # Development server (http://localhost:3000)
+npm run build       # Production build
+npm run preview     # Preview production build
+npm run type-check  # TypeScript type checking
+npm run lint        # ESLint
+```
+
+### Auto-Build & Integrated Serving
+
+The backend can automatically build and serve the frontend — no separate dev server needed.
+
+Configure in `config.toml`:
+
+```toml
+[frontend]
+enabled = true       # Serve frontend from FastAPI
+dist_dir = "frontend/dist"  # Built output directory
+auto_build = true    # Auto-run `npm install && npm run build` if dist is missing
+source_dir = "frontend"    # Frontend source directory
+```
+
+When `enabled = true` and `auto_build = true`, the backend will:
+1. Check if `frontend/dist/index.html` exists
+2. If not, run `npm install` then `npm run build` automatically
+3. Mount the built static files and serve them at the same origin as the API
+4. SPA routes (e.g. `/`, `/info/1`, `/tasks`) are served by `index.html` with fallback
+
+This means you can start everything with a single command:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Then visit `http://localhost:8000` — both API and frontend are served from the same port.
+
+To disable (e.g. for development with `npm run dev`), set `enabled = false`.
+
+### Environment Variables
+
+Create `.env.development` and `.env.production` in `frontend/`:
+
+- `VITE_API_BASE_URL` — API base URL (dev: `/api`, proxied to `http://localhost:8000`)
+- `VITE_IMAGE_BASE_URL` — External image server base URL for cover thumbnails and page previews
+
+### Pages
+
+| Route | Page | Description |
+|-------|------|-------------|
+| `/` | Search | Upload image to search for similar manga |
+| `/info/:id` | Detail | View pack metadata, keywords, and cover |
+| `/import` | Import | Submit E-Hentai URLs for async import |
+| `/tasks` | Tasks | View, filter, and cancel async tasks |
+
+### Responsive Design
+
+- **Mobile** (`<960px`): Bottom navigation bar, single-column grid
+- **Tablet** (`960px`+): Side navigation drawer (rail mode), 2-3 column grid
+- **Desktop** (`1280px`+): Expandable side navigation, 3-4 column grid
+- Touch-friendly: minimum 44×44px tap targets, no hover-dependent logic on mobile
+
+### Theme
+
+- Material You (M3) color system with light/dark themes
+- Theme toggle persisted in `localStorage`
+- Follows system preference on first visit
+
 ## `/search` endpoint
 
-`POST /search` (multipart/form-data)
+`POST /api/search` (multipart/form-data)
 
 Fields:
 - `image`: uploaded image file
@@ -174,8 +265,8 @@ Response format:
 ## `/info` endpoint
 
 Both forms are supported:
-- `GET /info/{id}`
-- `GET /info?id=123`
+- `GET /api/info/{id}`
+- `GET /api/info?id=123`
 
 Used to query pack metadata by `pack_id`.
 
