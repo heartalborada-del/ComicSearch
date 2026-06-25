@@ -192,6 +192,11 @@ class SetQuotaRequest(BaseModel):
     daily_quota: int = 0  # -1 = unlimited, 0 = use global default
 
 
+class ResetPasswordRequest(BaseModel):
+    user_id: int
+    new_password: str
+
+
 def parse_keyword_ids(raw_keyword_ids: str | None) -> list[int]:
     if raw_keyword_ids is None or raw_keyword_ids.strip() == "":
         return []
@@ -951,6 +956,29 @@ def create_app(
         db.commit()
         logger.info("admin %s set quota for %s users to %s", auth_user.username, count, value)
         return {"count": count}
+
+    @api_router.post("/auth/users/reset-password")
+    async def reset_user_password(
+        payload: ResetPasswordRequest = Body(...),
+        auth_user: User = Depends(require_admin),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        """Admin: reset a user's password."""
+        if not payload.new_password or len(payload.new_password.strip()) == 0:
+            raise HTTPException(status_code=400, detail="new password is required")
+        if len(payload.new_password) < 6:
+            raise HTTPException(status_code=400, detail="new password must be at least 6 characters")
+
+        user = db.get(User, payload.user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail=f"user not found: {payload.user_id}")
+        if user.is_admin:
+            raise HTTPException(status_code=403, detail="cannot reset password of another admin")
+
+        user.password_hash = hash_password(payload.new_password)
+        db.commit()
+        logger.info("admin %s reset password for user %s (id=%s)", auth_user.username, user.username, user.id)
+        return {"user_id": user.id, "username": user.username}
 
     # Include API router with /api prefix
     app.include_router(api_router)

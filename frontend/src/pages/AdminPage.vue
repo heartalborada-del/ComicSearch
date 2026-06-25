@@ -6,6 +6,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { getJson, postJson, ApiError } from '@/api/client'
 import type { TaskRecord } from '@/types/task'
 import { listReviewTasks, approveTask, rejectTask } from '@/api/tasks'
+import { resetUserPassword } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 
 // ---- Types ----
@@ -37,10 +38,17 @@ const selectedIds = ref<Set<number>>(new Set())
 const bulkLoading = ref(false)
 const bulkQuotaDialog = ref(false)
 const bulkQuota = ref<number>(0)
-const editingUserId = ref<number | null>(null)
-const editingQuota = ref<number>(0)
-const quotaSaving = ref(false)
 const banSaving = ref(false)
+
+// ---- Edit User Dialog ----
+const editDialog = ref(false)
+const editUserId = ref<number>(0)
+const editUsername = ref('')
+const editQuota = ref<number>(0)
+const editNewPassword = ref('')
+const editConfirmPassword = ref('')
+const editLoading = ref(false)
+const editError = ref<string | null>(null)
 const toast = ref<{ type: 'success' | 'error'; text: string } | null>(null)
 
 const globalDefaultQuota = computed(() => authStore.quota?.daily_quota ?? 50)
@@ -118,36 +126,67 @@ watch([searchQuery, filterStatus, filterRole], () => {
 })
 
 // --- Single user operations ---
-function startEdit(user: AdminUserItem): void {
-    editingUserId.value = user.id
-    editingQuota.value = user.daily_quota ?? globalDefaultQuota.value
-    toast.value = null
+function openEditUser(user: AdminUserItem): void {
+    editUserId.value = user.id
+    editUsername.value = user.username
+    editQuota.value = user.daily_quota ?? globalDefaultQuota.value
+    editNewPassword.value = ''
+    editConfirmPassword.value = ''
+    editError.value = null
+    editDialog.value = true
 }
 
-function cancelEdit(): void {
-    editingUserId.value = null
-    toast.value = null
+function closeEditUser(): void {
+    editDialog.value = false
+    editUserId.value = 0
+    editUsername.value = ''
+    editError.value = null
 }
 
-async function saveQuota(user: AdminUserItem): Promise<void> {
-    quotaSaving.value = true
-    toast.value = null
+async function doSaveEditUser(): Promise<void> {
+    editError.value = null
+
+    // Validate password if provided
+    const pwd = editNewPassword.value.trim()
+    if (pwd && pwd.length < 6) {
+        editError.value = '密码至少需要 6 个字符'
+        return
+    }
+    if (pwd && pwd !== editConfirmPassword.value) {
+        editError.value = '两次输入的密码不一致'
+        return
+    }
+
+    editLoading.value = true
+    const parts: string[] = []
     try {
+        // Always update quota
         await postJson<{ count: number }>('/auth/quota/set', {
-            user_ids: [user.id],
-            daily_quota: editingQuota.value,
+            user_ids: [editUserId.value],
+            daily_quota: editQuota.value,
         })
-        if (editingQuota.value <= 0) {
-            user.daily_quota = null
-        } else {
-            user.daily_quota = editingQuota.value
+        const u = allUsers.value.find((x) => x.id === editUserId.value)
+        if (u) {
+            u.daily_quota = editQuota.value <= 0 ? null : editQuota.value
         }
-        editingUserId.value = null
-        showToast('success', `${user.username} 配额已更新`)
+        parts.push('配额已更新')
+
+        // Only reset password if provided
+        if (pwd) {
+            await resetUserPassword({
+                user_id: editUserId.value,
+                new_password: pwd,
+            })
+            parts.push('密码已重置')
+        }
+
+        const username = editUsername.value
+        closeEditUser()
+        showToast('success', `${username} ${parts.join('，')}`)
     } catch (err) {
-        showToast('error', err instanceof ApiError ? err.detail : '更新失败')
+        editError.value = err instanceof ApiError ? err.detail : '操作失败'
     } finally {
-        quotaSaving.value = false
+        editLoading.value = false
     }
 }
 
@@ -447,21 +486,7 @@ onMounted(loadUsers)
                                 </div>
                             </td>
                             <td>
-                                <template v-if="editingUserId === user.id">
-                                    <div class="d-flex align-center ga-1">
-                                        <v-text-field v-model.number="editingQuota" type="number" density="compact"
-                                            variant="outlined" hide-details class="quota-input" style="max-width: 80px"
-                                            :min="-1" />
-                                        <v-btn size="x-small" color="primary" variant="tonal" :loading="quotaSaving"
-                                            @click="saveQuota(user)">
-                                            <v-icon size="14">mdi-check</v-icon>
-                                        </v-btn>
-                                        <v-btn size="x-small" variant="text" @click="cancelEdit">
-                                            <v-icon size="14">mdi-close</v-icon>
-                                        </v-btn>
-                                    </div>
-                                </template>
-                                <v-chip v-else size="x-small">
+                                <v-chip size="x-small">
                                     {{ quotaLabel(user.daily_quota) }}
                                 </v-chip>
                             </td>
@@ -491,9 +516,8 @@ onMounted(loadUsers)
                             </td>
                             <td class="text-right">
                                 <div v-if="!user.is_admin" class="d-flex ga-1 justify-end">
-                                    <v-btn size="x-small" variant="tonal" color="primary"
-                                        :disabled="editingUserId === user.id" @click="startEdit(user)">
-                                        配额
+                                    <v-btn size="x-small" variant="tonal" color="primary" @click="openEditUser(user)">
+                                        编辑
                                     </v-btn>
                                     <v-btn size="x-small" variant="tonal" :color="user.is_active ? 'error' : 'success'"
                                         :loading="banSaving" @click="toggleBan(user)">
@@ -525,6 +549,44 @@ onMounted(loadUsers)
                         <v-btn variant="text" @click="bulkQuotaDialog = false">取消</v-btn>
                         <v-btn variant="tonal" color="primary" :loading="bulkLoading" @click="doBulkQuota">
                             确认
+                        </v-btn>
+                    </v-card-actions>
+                </v-card>
+            </v-dialog>
+
+            <!-- Edit User Dialog -->
+            <v-dialog v-model="editDialog" max-width="420">
+                <v-card rounded="lg">
+                    <v-card-title class="text-body-1 font-weight-medium">
+                        编辑用户 — {{ editUsername }}
+                    </v-card-title>
+                    <v-card-text>
+                        <v-alert v-if="editError" type="error" variant="tonal" rounded="lg" class="mb-3"
+                            density="compact">
+                            {{ editError }}
+                        </v-alert>
+
+                        <!-- Quota -->
+                        <div class="text-subtitle-2 text-on-surface-variant mb-1">每日配额</div>
+                        <v-text-field v-model.number="editQuota" label="0=全局默认，-1=无限" type="number" variant="outlined"
+                            density="compact" :min="-1" class="mb-4" />
+
+                        <v-divider class="mb-4" />
+
+                        <!-- Password (optional) -->
+                        <div class="text-subtitle-2 text-on-surface-variant mb-1">
+                            修改密码<span class="text-caption text-on-surface-variant ml-1">（留空则不修改）</span>
+                        </div>
+                        <v-text-field v-model="editNewPassword" label="新密码" type="password" variant="outlined"
+                            density="compact" class="mb-2" />
+                        <v-text-field v-model="editConfirmPassword" label="确认新密码" type="password" variant="outlined"
+                            density="compact" />
+                    </v-card-text>
+                    <v-card-actions>
+                        <v-spacer />
+                        <v-btn variant="text" @click="closeEditUser">取消</v-btn>
+                        <v-btn variant="tonal" color="primary" :loading="editLoading" @click="doSaveEditUser">
+                            保存
                         </v-btn>
                     </v-card-actions>
                 </v-card>

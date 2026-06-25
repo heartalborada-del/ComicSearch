@@ -66,3 +66,22 @@ export interface SetQuotaResponse {
 export function setUserQuota(data: SetQuotaRequest): Promise<SetQuotaResponse> {
     return postJson<SetQuotaResponse>('/auth/quota/set', data)
 }
+
+/** Request body for POST /auth/users/reset-password (admin only). */
+export interface ResetPasswordRequest {
+    user_id: number
+    new_password: string
+}
+
+/** Response from POST /auth/users/reset-password. */
+export interface ResetPasswordResponse {
+    user_id: number
+    username: string
+}
+
+/**
+ * Admin: reset a user's password.
+ */
+export function resetUserPassword(data: ResetPasswordRequest): Promise<ResetPasswordResponse> {
+    return postJson<ResetPasswordResponse>('/auth/users/reset-password', data)
+}
