@@ -56,6 +56,7 @@ class EhentaiSettings:
     archive_extract_root: str = "comics/origin/ehentai"
     image_serve_root: str = "comics/served"
     allow_archive_fallback: bool = False
+    require_review: bool = False
 
 
 @dataclass(frozen=True)
@@ -299,6 +300,10 @@ def load_settings(config_path: str | os.PathLike[str] | None = None) -> AppSetti
         allow_archive_fallback=_coerce_bool(
             ehentai_section.get("allow_archive_fallback", False),
             field_name="ehentai.allow_archive_fallback",
+        ),
+        require_review=_coerce_bool(
+            ehentai_section.get("require_review", False),
+            field_name="ehentai.require_review",
         ),
     )
 

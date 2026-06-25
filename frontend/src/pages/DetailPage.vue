@@ -94,7 +94,7 @@ watch(
       <v-row>
         <!-- Cover Image -->
         <v-col cols="12" sm="3" md="2" class="d-flex justify-center">
-          <v-card variant="tonal" class="bg-surface-container" rounded="xl" max-width="200" overflow="hidden">
+          <v-card variant="tonal" class="bg-surface-container" rounded="lg" max-width="200" overflow="hidden">
             <v-img :src="coverSrc" aspect-ratio="0.7" cover class="bg-surface-container-high">
               <template #placeholder>
                 <div class="d-flex align-center justify-center fill-height">

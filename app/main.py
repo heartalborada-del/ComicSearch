@@ -123,6 +123,7 @@ class TaskStatusResponse(BaseModel):
     finished_at: str | None = None
     result: dict[str, Any] | None = None
     error: str | None = None
+    payload: dict[str, Any] | None = None
 
 
 # ---- Auth Pydantic models ----
@@ -318,6 +319,7 @@ def create_app(
             finished_at=record.finished_at,
             result=record.result if isinstance(record.result, dict) else None,
             error=record.error,
+            payload=record.payload if isinstance(record.payload, dict) else None,
         )
 
     def _pack_info_response(pack_id: int, db: Session) -> dict[str, Any]:
@@ -441,6 +443,9 @@ def create_app(
             raise HTTPException(status_code=400, detail="either url or urls must be provided")
 
         items: list[EhentaiImportTaskSubmitItemResponse] = []
+        require_review = app.state.runtime.settings.ehentai.require_review
+        needs_review = require_review and not auth_user.is_admin
+
         for request_url in request_urls:
             submit_result = manager.submit_or_get_existing(
                 task_type="ehentai_import",
@@ -449,6 +454,8 @@ def create_app(
                     "crop_faces": bool(payload.crop_faces),
                     "user_id": auth_user.id,
                 },
+                dedup_statuses=("pending", "running") if not needs_review else ("pending", "running", "pending_review"),
+                initial_status="pending_review" if needs_review else "pending",
             )
             is_duplicate = not bool(submit_result.created)
             response_status = "duplicate" if is_duplicate else submit_result.status
@@ -475,6 +482,46 @@ def create_app(
             status=first_item.status,
             items=items,
         )
+
+    @api_router.get("/tasks/review", response_model=list[TaskStatusResponse])
+    async def list_review_tasks(
+        limit: int = Query(default=50, ge=1, le=500),
+        auth_user: User = Depends(require_admin),
+    ) -> list[TaskStatusResponse]:
+        """Admin: list tasks pending review."""
+        manager = app.state.runtime.task_manager
+        if manager is None:
+            raise HTTPException(status_code=503, detail="task manager is not available")
+        records = manager.list_tasks(limit=int(limit), status_filter="pending_review")
+        return [_task_record_response(record) for record in records]
+
+    @api_router.post("/tasks/{task_id}/approve", response_model=TaskStatusResponse)
+    async def approve_task(
+        task_id: str = Path(..., title="Task ID"),
+        auth_user: User = Depends(require_admin),
+    ) -> TaskStatusResponse:
+        """Admin: approve a pending_review task."""
+        manager = app.state.runtime.task_manager
+        if manager is None:
+            raise HTTPException(status_code=503, detail="task manager is not available")
+        record = manager.approve(task_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"task not found or not pending review: {task_id}")
+        return _task_record_response(record)
+
+    @api_router.post("/tasks/{task_id}/reject", response_model=TaskStatusResponse)
+    async def reject_task(
+        task_id: str = Path(..., title="Task ID"),
+        auth_user: User = Depends(require_admin),
+    ) -> TaskStatusResponse:
+        """Admin: reject a pending_review task."""
+        manager = app.state.runtime.task_manager
+        if manager is None:
+            raise HTTPException(status_code=503, detail="task manager is not available")
+        record = manager.reject(task_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"task not found or not pending review: {task_id}")
+        return _task_record_response(record)
 
     @api_router.get("/tasks/{task_id}", response_model=TaskStatusResponse)
     async def get_task_status(
@@ -552,6 +599,45 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
 
         return _task_record_response(record)
+
+    @api_router.get("/tag/search")
+    async def search_tags(
+        q: str = Query(default="", title="Search query"),
+        limit: int = Query(default=30, ge=1, le=200),
+        auth_user: User = Depends(require_auth),
+        db: Session = Depends(get_db),
+    ) -> list[dict[str, Any]]:
+        """Search tags by name (prefix match, case-insensitive). Requires login.
+        Returns matching tags with their associated pack count.
+        """
+        query = q.strip()
+        if not query or len(query) < 2:
+            return []
+
+        pattern = f"{query}%"
+        tags = db.execute(
+            select(Keyword.id, Keyword.name)
+            .where(Keyword.name.ilike(pattern))
+            .order_by(Keyword.name.asc())
+            .limit(int(limit))
+        ).all()
+
+        if not tags:
+            return []
+
+        keyword_ids = [t.id for t in tags]
+        from sqlalchemy import func
+        counts = db.execute(
+            select(PackKeyword.keyword_id, func.count(PackKeyword.pack_id))
+            .where(PackKeyword.keyword_id.in_(keyword_ids))
+            .group_by(PackKeyword.keyword_id)
+        ).all()
+        count_map: dict[int, int] = {kw_id: int(cnt) for kw_id, cnt in counts}
+
+        return [
+            {"id": int(kw_id), "name": str(name), "pack_count": count_map.get(kw_id, 0)}
+            for kw_id, name in tags
+        ]
 
     @api_router.get("/info/{id}")
     async def info(

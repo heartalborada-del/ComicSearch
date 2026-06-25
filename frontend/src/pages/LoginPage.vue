@@ -97,13 +97,7 @@ async function handleSubmit(): Promise<void> {
 
 <template>
   <div class="auth-page d-flex align-center justify-center" style="min-height: calc(100vh - 128px)">
-    <v-card
-      variant="tonal"
-      class="bg-surface-container pa-6"
-      rounded="xl"
-      max-width="420"
-      width="100%"
-    >
+    <v-card variant="tonal" class="bg-surface-container pa-6" rounded="lg" max-width="420" width="100%">
       <!-- Header -->
       <div class="text-center mb-6">
         <v-icon size="48" color="primary" class="mb-2">mdi-shield-account</v-icon>
@@ -119,73 +113,34 @@ async function handleSubmit(): Promise<void> {
 
       <!-- Form -->
       <v-form @submit.prevent="handleSubmit">
-        <v-text-field
-          v-model="username"
-          label="用户名"
-          prepend-inner-icon="mdi-account"
-          :rules="[v => !!v || '请输入用户名']"
-          autocomplete="username"
-          class="mb-3"
-        />
+        <v-text-field v-model="username" label="用户名" prepend-inner-icon="mdi-account" :rules="[v => !!v || '请输入用户名']"
+          autocomplete="username" class="mb-3" />
 
-        <v-text-field
-          v-model="password"
-          label="密码"
-          type="password"
-          prepend-inner-icon="mdi-lock"
-          :rules="[v => !!v || '请输入密码', v => (v?.length ?? 0) >= 6 || '密码至少6位']"
-          autocomplete="current-password"
-          class="mb-4"
-        />
+        <v-text-field v-model="password" label="密码" type="password" prepend-inner-icon="mdi-lock"
+          :rules="[v => !!v || '请输入密码', v => (v?.length ?? 0) >= 6 || '密码至少6位']" autocomplete="current-password"
+          class="mb-4" />
 
         <!-- Turnstile -->
         <div v-if="siteKey" class="mb-4">
-          <TurnstileWidget
-            :site-key="siteKey"
-            :reset-key="turnstileResetKey"
-            @verify="onTurnstileVerify"
-            @error="onTurnstileError"
-          />
+          <TurnstileWidget :site-key="siteKey" :reset-key="turnstileResetKey" @verify="onTurnstileVerify"
+            @error="onTurnstileError" />
         </div>
 
         <!-- Form Error -->
-        <v-alert
-          v-if="formError"
-          type="error"
-          variant="tonal"
-          density="compact"
-          rounded="lg"
-          class="mb-4"
-          closable
-          @click:close="formError = null"
-        >
+        <v-alert v-if="formError" type="error" variant="tonal" density="compact" rounded="lg" class="mb-4" closable
+          @click:close="formError = null">
           {{ formError }}
         </v-alert>
 
         <!-- Server Error -->
-        <v-alert
-          v-if="error"
-          type="error"
-          variant="tonal"
-          density="compact"
-          rounded="lg"
-          class="mb-4"
-          closable
-          @click:close="authStore.loginError = null"
-        >
+        <v-alert v-if="error" type="error" variant="tonal" density="compact" rounded="lg" class="mb-4" closable
+          @click:close="authStore.loginError = null">
           {{ error }}
         </v-alert>
 
         <!-- Submit -->
-        <v-btn
-          color="primary"
-          block
-          size="large"
-          rounded="lg"
-          :loading="submitting"
-          :disabled="!canSubmit"
-          @click="handleSubmit"
-        >
+        <v-btn color="primary" block size="large" rounded="lg" :loading="submitting" :disabled="!canSubmit"
+          @click="handleSubmit">
           {{ tab === 'login' ? '登录' : '注册' }}
         </v-btn>
       </v-form>

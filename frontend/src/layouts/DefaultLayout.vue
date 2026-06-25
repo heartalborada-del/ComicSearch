@@ -28,6 +28,7 @@ interface NavItem {
 
 const navItems: NavItem[] = [
   { icon: 'mdi-image-search', title: '搜索', to: '/' },
+  { icon: 'mdi-tag-search', title: '标签', to: '/tags', requiresAuth: true },
   { icon: 'mdi-import', title: '导入', to: '/import', requiresAuth: true },
   { icon: 'mdi-format-list-checks', title: '任务', to: '/tasks', requiresAuth: true },
   { icon: 'mdi-shield-account', title: '管理', to: '/admin', requiresAuth: true, adminOnly: true },

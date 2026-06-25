@@ -38,6 +38,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '用户管理', requiresAuth: true },
     },
     {
+        path: '/tags',
+        name: 'tags',
+        component: () => import('@/pages/TagSearchPage.vue'),
+        meta: { title: '标签搜索', requiresAuth: true },
+    },
+    {
         path: '/login',
         name: 'login',
         component: () => import('@/pages/LoginPage.vue'),

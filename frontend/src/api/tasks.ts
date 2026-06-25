@@ -53,3 +53,24 @@ export function listTasks(params?: ListTasksParams): Promise<TaskRecord[]> {
 export function cancelTask(taskId: string): Promise<TaskRecord> {
     return postJson<TaskRecord>(`/tasks/${taskId}/cancel`, {})
 }
+
+/**
+ * Admin: list tasks pending review.
+ */
+export function listReviewTasks(): Promise<TaskRecord[]> {
+    return getJson<TaskRecord[]>('/tasks/review')
+}
+
+/**
+ * Admin: approve a pending_review task.
+ */
+export function approveTask(taskId: string): Promise<TaskRecord> {
+    return postJson<TaskRecord>(`/tasks/${taskId}/approve`, {})
+}
+
+/**
+ * Admin: reject a pending_review task.
+ */
+export function rejectTask(taskId: string): Promise<TaskRecord> {
+    return postJson<TaskRecord>(`/tasks/${taskId}/reject`, {})
+}

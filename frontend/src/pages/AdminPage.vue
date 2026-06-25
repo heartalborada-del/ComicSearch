@@ -1,9 +1,11 @@
 <script setup lang="ts">
 /**
- * Admin page — user management with search, bulk operations, quota editing, and IP records.
+ * Admin page — user management + import review.
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { getJson, postJson, ApiError } from '@/api/client'
+import type { TaskRecord } from '@/types/task'
+import { listReviewTasks, approveTask, rejectTask } from '@/api/tasks'
 import { useAuthStore } from '@/stores/auth'
 
 // ---- Types ----
@@ -21,25 +23,20 @@ interface AdminUserItem {
 
 const authStore = useAuthStore()
 
-// ---- State ----
+// ---- Tabs ----
+const activeTab = ref<'users' | 'review'>('users')
+
+// ---- State (users) ----
 const allUsers = ref<AdminUserItem[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
-
-// Search & filter
 const searchQuery = ref('')
 const filterStatus = ref<'all' | 'active' | 'banned'>('all')
 const filterRole = ref<'all' | 'admin' | 'user'>('all')
-
-// Selection
 const selectedIds = ref<Set<number>>(new Set())
-
-// Bulk operations
 const bulkLoading = ref(false)
 const bulkQuotaDialog = ref(false)
 const bulkQuota = ref<number>(0)
-
-// Quota editing (single)
 const editingUserId = ref<number | null>(null)
 const editingQuota = ref<number>(0)
 const quotaSaving = ref(false)
@@ -47,6 +44,11 @@ const banSaving = ref(false)
 const toast = ref<{ type: 'success' | 'error'; text: string } | null>(null)
 
 const globalDefaultQuota = computed(() => authStore.quota?.daily_quota ?? 50)
+
+// ---- State (review) ----
+const reviewTasks = ref<TaskRecord[]>([])
+const reviewLoading = ref(false)
+const reviewActing = ref(false)
 
 // ---- Computed ----
 const filteredUsers = computed(() => {
@@ -241,18 +243,87 @@ function roleChip(user: AdminUserItem): { color: string; text: string } {
     return { color: '', text: '用户' }
 }
 
+// --- Review actions ---
+async function loadReviewTasks(): Promise<void> {
+    reviewLoading.value = true
+    try {
+        reviewTasks.value = await listReviewTasks()
+    } catch (err) {
+        showToast('error', err instanceof ApiError ? err.detail : '加载审核列表失败')
+    } finally {
+        reviewLoading.value = false
+    }
+}
+
+async function doApprove(task: TaskRecord): Promise<void> {
+    reviewActing.value = true
+    try {
+        await approveTask(task.task_id)
+        reviewTasks.value = reviewTasks.value.filter((t) => t.task_id !== task.task_id)
+        showToast('success', '已通过审核')
+    } catch (err) {
+        showToast('error', err instanceof ApiError ? err.detail : '审核失败')
+    } finally {
+        reviewActing.value = false
+    }
+}
+
+async function doReject(task: TaskRecord): Promise<void> {
+    reviewActing.value = true
+    try {
+        await rejectTask(task.task_id)
+        reviewTasks.value = reviewTasks.value.filter((t) => t.task_id !== task.task_id)
+        showToast('success', '已拒绝')
+    } catch (err) {
+        showToast('error', err instanceof ApiError ? err.detail : '拒绝失败')
+    } finally {
+        reviewActing.value = false
+    }
+}
+
+function parseTaskUrl(task: TaskRecord): string {
+    const p = task.payload as Record<string, unknown> | null
+    return (p?.url as string) ?? '—'
+}
+
+function reviewStatusChip(task: TaskRecord): { color: string; text: string } {
+    const statusMap: Record<string, { color: string; text: string }> = {
+        pending_review: { color: 'warning', text: '待审核' },
+        pending: { color: 'info', text: '等待执行' },
+        running: { color: 'primary', text: '执行中' },
+        success: { color: 'success', text: '已完成' },
+        failed: { color: 'error', text: '失败' },
+        cancelled: { color: '', text: '已取消' },
+    }
+    return statusMap[task.status] ?? { color: '', text: task.status }
+}
+
+watch(activeTab, (tab) => {
+    if (tab === 'review') loadReviewTasks()
+})
+
 onMounted(loadUsers)
 </script>
 
 <template>
     <div class="admin-page">
-        <!-- Header -->
+        <!-- Header + Tabs -->
         <div class="d-flex align-center ga-3 mb-4 flex-wrap">
-            <h1 class="text-h5 font-weight-medium">用户管理</h1>
-            <v-chip v-if="allUsers.length" size="small" variant="tonal" color="primary">
+            <h1 class="text-h5 font-weight-medium">管理后台</h1>
+            <v-btn-toggle v-model="activeTab" mandatory density="comfortable" variant="tonal" color="primary">
+                <v-btn value="users" size="small" prepend-icon="mdi-account-group">
+                    用户管理
+                </v-btn>
+                <v-btn value="review" size="small" prepend-icon="mdi-file-document-check" class="ml-2">
+                    导入审核
+                    <v-badge v-if="reviewTasks.length > 0" :content="reviewTasks.length" color="warning" inline
+                        class="ml-1" />
+                </v-btn>
+            </v-btn-toggle>
+            <v-chip v-if="allUsers.length && activeTab === 'users'" size="small" variant="tonal" color="primary">
                 {{ allUsers.length }} 个用户
             </v-chip>
-            <v-chip v-if="selectedCount > 0" size="small" variant="tonal" color="secondary">
+            <v-chip v-if="selectedCount > 0 && activeTab === 'users'" size="small" variant="tonal" color="secondary">
                 已选 {{ selectedCount }}
             </v-chip>
         </div>
@@ -262,138 +333,141 @@ onMounted(loadUsers)
             {{ toast.text }}
         </v-alert>
 
-        <!-- Toolbar -->
-        <v-card variant="tonal" class="bg-surface-container mb-4" rounded="xl">
-            <v-card-text class="pa-3">
-                <v-row dense align="center">
-                    <v-col cols="12" sm="4" md="3">
-                        <v-text-field v-model="searchQuery" label="搜索用户名/ID/IP" density="compact" variant="outlined"
-                            hide-details clearable prepend-inner-icon="mdi-magnify" />
-                    </v-col>
-                    <v-col cols="6" sm="3" md="2">
-                        <v-select v-model="filterStatus" :items="[
-                            { title: '全部状态', value: 'all' },
-                            { title: '正常', value: 'active' },
-                            { title: '已封禁', value: 'banned' },
-                        ]" density="compact" variant="outlined" hide-details />
-                    </v-col>
-                    <v-col cols="6" sm="3" md="2">
-                        <v-select v-model="filterRole" :items="[
-                            { title: '全部角色', value: 'all' },
-                            { title: '管理员', value: 'admin' },
-                            { title: '用户', value: 'user' },
-                        ]" density="compact" variant="outlined" hide-details />
-                    </v-col>
-                    <v-col cols="12" sm="2" md="5">
-                        <div class="d-flex ga-1 flex-wrap justify-sm-end">
-                            <v-btn v-if="selectedCount > 0" size="small" variant="tonal" color="error"
-                                :loading="bulkLoading" @click="bulkBan">
-                                批量封禁
-                            </v-btn>
-                            <v-btn v-if="selectedCount > 0" size="small" variant="tonal" color="success"
-                                :loading="bulkLoading" @click="bulkUnban">
-                                批量解禁
-                            </v-btn>
-                            <v-btn v-if="selectedCount > 0" size="small" variant="tonal" color="primary"
-                                :loading="bulkLoading" @click="openBulkQuota">
-                                批量设配额
-                            </v-btn>
-                            <span v-if="selectedCount === 0" class="text-caption text-on-surface-variant">
-                                勾选用户后可批量操作
-                            </span>
-                        </div>
-                    </v-col>
-                </v-row>
-            </v-card-text>
-        </v-card>
+        <!-- ====== User Management Tab ====== -->
+        <div class="tab-panel" :class="{ 'tab-panel--active': activeTab === 'users' }">
 
-        <!-- Loading -->
-        <div v-if="loading" class="d-flex justify-center py-12">
-            <v-progress-circular indeterminate color="primary" size="40" width="4" />
-        </div>
-
-        <!-- Error -->
-        <v-alert v-else-if="error" type="error" variant="tonal" rounded="lg" class="mb-4">
-            {{ error }}
-        </v-alert>
-
-        <!-- Table -->
-        <v-card v-else variant="tonal" class="bg-surface-container" rounded="xl">
-            <v-table density="comfortable" hover>
-                <thead>
-                    <tr>
-                        <th style="width: 40px">
-                            <v-checkbox :model-value="isAllSelected"
-                                :indeterminate="selectedCount > 0 && !isAllSelected" density="compact" hide-details
-                                @click="toggleSelectAll" />
-                        </th>
-                        <th class="text-caption text-on-surface-variant">ID</th>
-                        <th class="text-caption text-on-surface-variant">用户名</th>
-                        <th class="text-caption text-on-surface-variant">角色</th>
-                        <th class="text-caption text-on-surface-variant">IP</th>
-                        <th class="text-caption text-on-surface-variant">日配额</th>
-                        <th class="text-caption text-on-surface-variant">今日用量</th>
-                        <th class="text-caption text-on-surface-variant text-right">操作</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr v-for="user in filteredUsers" :key="user.id"
-                        :class="{ 'bg-surface-container-high': selectedIds.has(user.id) }">
-                        <td>
-                            <v-checkbox :model-value="selectedIds.has(user.id)" :disabled="user.is_admin"
-                                density="compact" hide-details @click="toggleSelect(user.id)" />
-                        </td>
-                        <td class="text-caption text-on-surface-variant">{{ user.id }}</td>
-                        <td>
-                            <div class="d-flex align-center ga-2">
-                                <v-icon v-if="user.is_admin" size="16" color="primary">mdi-shield-star</v-icon>
-                                <v-icon v-else-if="!user.is_active" size="16" color="error">mdi-account-cancel</v-icon>
-                                <span :class="{ 'text-on-surface-variant': !user.is_active }">
-                                    {{ user.username }}
+            <!-- Toolbar -->
+            <v-card variant="tonal" class="bg-surface-container mb-4" rounded="lg">
+                <v-card-text class="pa-3">
+                    <v-row dense align="center">
+                        <v-col cols="12" sm="4" md="3">
+                            <v-text-field v-model="searchQuery" label="搜索用户名/ID/IP" density="compact" variant="outlined"
+                                hide-details clearable prepend-inner-icon="mdi-magnify" />
+                        </v-col>
+                        <v-col cols="6" sm="3" md="2">
+                            <v-select v-model="filterStatus" :items="[
+                                { title: '全部状态', value: 'all' },
+                                { title: '正常', value: 'active' },
+                                { title: '已封禁', value: 'banned' },
+                            ]" density="compact" variant="outlined" hide-details />
+                        </v-col>
+                        <v-col cols="6" sm="3" md="2">
+                            <v-select v-model="filterRole" :items="[
+                                { title: '全部角色', value: 'all' },
+                                { title: '管理员', value: 'admin' },
+                                { title: '用户', value: 'user' },
+                            ]" density="compact" variant="outlined" hide-details />
+                        </v-col>
+                        <v-col cols="12" sm="2" md="5">
+                            <div class="d-flex ga-1 flex-wrap justify-sm-end">
+                                <v-btn v-if="selectedCount > 0" size="small" variant="tonal" color="error"
+                                    :loading="bulkLoading" @click="bulkBan">
+                                    批量封禁
+                                </v-btn>
+                                <v-btn v-if="selectedCount > 0" size="small" variant="tonal" color="success"
+                                    :loading="bulkLoading" @click="bulkUnban">
+                                    批量解禁
+                                </v-btn>
+                                <v-btn v-if="selectedCount > 0" size="small" variant="tonal" color="primary"
+                                    :loading="bulkLoading" @click="openBulkQuota">
+                                    批量设配额
+                                </v-btn>
+                                <span v-if="selectedCount === 0" class="text-caption text-on-surface-variant">
+                                    勾选用户后可批量操作
                                 </span>
                             </div>
-                        </td>
-                        <td>
-                            <v-chip size="x-small" :color="roleChip(user).color">
-                                {{ roleChip(user).text }}
-                            </v-chip>
-                        </td>
-                        <td>
-                            <div class="text-caption">
-                                <div v-if="user.registration_ip" class="d-flex align-center ga-1">
-                                    <v-icon size="12" color="on-surface-variant">mdi-account-plus</v-icon>
-                                    <span>{{ user.registration_ip }}</span>
+                        </v-col>
+                    </v-row>
+                </v-card-text>
+            </v-card>
+            <div v-if="loading" class="d-flex justify-center py-12">
+                <v-progress-circular indeterminate color="primary" size="40" width="4" />
+            </div>
+
+            <!-- Error -->
+            <v-alert v-else-if="error" type="error" variant="tonal" rounded="lg" class="mb-4">
+                {{ error }}
+            </v-alert>
+
+            <!-- Table -->
+            <v-card v-else variant="tonal" class="bg-surface-container" rounded="lg">
+                <v-table density="comfortable" hover>
+                    <thead>
+                        <tr>
+                            <th style="width: 40px">
+                                <v-checkbox :model-value="isAllSelected"
+                                    :indeterminate="selectedCount > 0 && !isAllSelected" density="compact" hide-details
+                                    @click="toggleSelectAll" />
+                            </th>
+                            <th class="text-caption text-on-surface-variant">ID</th>
+                            <th class="text-caption text-on-surface-variant">用户名</th>
+                            <th class="text-caption text-on-surface-variant">角色</th>
+                            <th class="text-caption text-on-surface-variant">IP</th>
+                            <th class="text-caption text-on-surface-variant">日配额</th>
+                            <th class="text-caption text-on-surface-variant">今日用量</th>
+                            <th class="text-caption text-on-surface-variant text-right">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="user in filteredUsers" :key="user.id"
+                            :class="{ 'bg-surface-container-high': selectedIds.has(user.id) }">
+                            <td>
+                                <v-checkbox :model-value="selectedIds.has(user.id)" :disabled="user.is_admin"
+                                    density="compact" hide-details @click="toggleSelect(user.id)" />
+                            </td>
+                            <td class="text-caption text-on-surface-variant">{{ user.id }}</td>
+                            <td>
+                                <div class="d-flex align-center ga-2">
+                                    <v-icon v-if="user.is_admin" size="16" color="primary">mdi-shield-star</v-icon>
+                                    <v-icon v-else-if="!user.is_active" size="16"
+                                        color="error">mdi-account-cancel</v-icon>
+                                    <span :class="{ 'text-on-surface-variant': !user.is_active }">
+                                        {{ user.username }}
+                                    </span>
                                 </div>
-                                <div v-for="(ip, i) in user.last_login_ips" :key="i" class="d-flex align-center ga-1">
-                                    <v-icon size="12" color="on-surface-variant">mdi-login</v-icon>
-                                    <span class="text-on-surface-variant">{{ ip }}</span>
+                            </td>
+                            <td>
+                                <v-chip size="x-small" :color="roleChip(user).color">
+                                    {{ roleChip(user).text }}
+                                </v-chip>
+                            </td>
+                            <td>
+                                <div class="text-caption">
+                                    <div v-if="user.registration_ip" class="d-flex align-center ga-1">
+                                        <v-icon size="12" color="on-surface-variant">mdi-account-plus</v-icon>
+                                        <span>{{ user.registration_ip }}</span>
+                                    </div>
+                                    <div v-for="(ip, i) in user.last_login_ips" :key="i"
+                                        class="d-flex align-center ga-1">
+                                        <v-icon size="12" color="on-surface-variant">mdi-login</v-icon>
+                                        <span class="text-on-surface-variant">{{ ip }}</span>
+                                    </div>
+                                    <span v-if="!user.registration_ip && user.last_login_ips.length === 0"
+                                        class="text-on-surface-variant">—</span>
                                 </div>
-                                <span v-if="!user.registration_ip && user.last_login_ips.length === 0"
-                                    class="text-on-surface-variant">—</span>
-                            </div>
-                        </td>
-                        <td>
-                            <template v-if="editingUserId === user.id">
-                                <div class="d-flex align-center ga-1">
-                                    <v-text-field v-model.number="editingQuota" type="number" density="compact"
-                                        variant="outlined" hide-details class="quota-input" style="max-width: 80px"
-                                        :min="-1" />
-                                    <v-btn size="x-small" color="primary" variant="tonal" :loading="quotaSaving"
-                                        @click="saveQuota(user)">
-                                        <v-icon size="14">mdi-check</v-icon>
-                                    </v-btn>
-                                    <v-btn size="x-small" variant="text" @click="cancelEdit">
-                                        <v-icon size="14">mdi-close</v-icon>
-                                    </v-btn>
-                                </div>
-                            </template>
-                            <v-chip v-else size="x-small">
-                                {{ quotaLabel(user.daily_quota) }}
-                            </v-chip>
-                        </td>
-                        <td>
-                            <div class="d-flex align-center ga-2" style="min-width: 80px">
-                                <v-progress-linear :model-value="user.is_admin
+                            </td>
+                            <td>
+                                <template v-if="editingUserId === user.id">
+                                    <div class="d-flex align-center ga-1">
+                                        <v-text-field v-model.number="editingQuota" type="number" density="compact"
+                                            variant="outlined" hide-details class="quota-input" style="max-width: 80px"
+                                            :min="-1" />
+                                        <v-btn size="x-small" color="primary" variant="tonal" :loading="quotaSaving"
+                                            @click="saveQuota(user)">
+                                            <v-icon size="14">mdi-check</v-icon>
+                                        </v-btn>
+                                        <v-btn size="x-small" variant="text" @click="cancelEdit">
+                                            <v-icon size="14">mdi-close</v-icon>
+                                        </v-btn>
+                                    </div>
+                                </template>
+                                <v-chip v-else size="x-small">
+                                    {{ quotaLabel(user.daily_quota) }}
+                                </v-chip>
+                            </td>
+                            <td>
+                                <div class="d-flex align-center ga-2" style="min-width: 80px">
+                                    <v-progress-linear :model-value="user.is_admin
                                         ? 0
                                         : Math.min(
                                             100,
@@ -401,65 +475,147 @@ onMounted(loadUsers)
                                                 Math.max(1, user.daily_quota ?? globalDefaultQuota)) *
                                             100,
                                         )
-                                    " :color="user.used_today >= (user.daily_quota ?? globalDefaultQuota) &&
-                        !user.is_admin
-                        ? 'error'
-                        : 'primary'
-                    " height="4" rounded style="max-width: 50px; min-width: 24px" />
-                                <span class="text-caption">
-                                    {{
-                                        user.is_admin
-                                            ? '—'
-                                            : `${user.used_today}/${user.daily_quota ?? globalDefaultQuota}`
-                                    }}
-                                </span>
-                            </div>
-                        </td>
-                        <td class="text-right">
-                            <div v-if="!user.is_admin" class="d-flex ga-1 justify-end">
-                                <v-btn size="x-small" variant="tonal" color="primary"
-                                    :disabled="editingUserId === user.id" @click="startEdit(user)">
-                                    配额
-                                </v-btn>
-                                <v-btn size="x-small" variant="tonal" :color="user.is_active ? 'error' : 'success'"
-                                    :loading="banSaving" @click="toggleBan(user)">
-                                    {{ user.is_active ? '封禁' : '解禁' }}
-                                </v-btn>
-                            </div>
-                            <span v-else class="text-caption text-on-surface-variant">—</span>
-                        </td>
-                    </tr>
-                </tbody>
-            </v-table>
-            <v-card-text v-if="filteredUsers.length === 0" class="text-center py-8 text-on-surface-variant">
-                {{ allUsers.length === 0 ? '暂无用户' : '无匹配结果' }}
-            </v-card-text>
-        </v-card>
-
-        <!-- Bulk Quota Dialog -->
-        <v-dialog v-model="bulkQuotaDialog" max-width="400">
-            <v-card rounded="xl">
-                <v-card-title class="text-body-1 font-weight-medium">
-                    批量设置配额 — {{ selectedCount }} 个用户
-                </v-card-title>
-                <v-card-text>
-                    <v-text-field v-model.number="bulkQuota" label="每日配额（0=全局默认，-1=无限）" type="number" variant="outlined"
-                        density="compact" :min="-1" />
+                                        " :color="user.used_today >= (user.daily_quota ?? globalDefaultQuota) &&
+                                            !user.is_admin
+                                            ? 'error'
+                                            : 'primary'
+                                            " height="4" rounded style="max-width: 50px; min-width: 24px" />
+                                    <span class="text-caption">
+                                        {{
+                                            user.is_admin
+                                                ? '—'
+                                                : `${user.used_today}/${user.daily_quota ?? globalDefaultQuota}`
+                                        }}
+                                    </span>
+                                </div>
+                            </td>
+                            <td class="text-right">
+                                <div v-if="!user.is_admin" class="d-flex ga-1 justify-end">
+                                    <v-btn size="x-small" variant="tonal" color="primary"
+                                        :disabled="editingUserId === user.id" @click="startEdit(user)">
+                                        配额
+                                    </v-btn>
+                                    <v-btn size="x-small" variant="tonal" :color="user.is_active ? 'error' : 'success'"
+                                        :loading="banSaving" @click="toggleBan(user)">
+                                        {{ user.is_active ? '封禁' : '解禁' }}
+                                    </v-btn>
+                                </div>
+                                <span v-else class="text-caption text-on-surface-variant">—</span>
+                            </td>
+                        </tr>
+                    </tbody>
+                </v-table>
+                <v-card-text v-if="filteredUsers.length === 0" class="text-center py-8 text-on-surface-variant">
+                    {{ allUsers.length === 0 ? '暂无用户' : '无匹配结果' }}
                 </v-card-text>
-                <v-card-actions>
-                    <v-spacer />
-                    <v-btn variant="text" @click="bulkQuotaDialog = false">取消</v-btn>
-                    <v-btn variant="tonal" color="primary" :loading="bulkLoading" @click="doBulkQuota">
-                        确认
-                    </v-btn>
-                </v-card-actions>
             </v-card>
-        </v-dialog>
+
+            <!-- Bulk Quota Dialog -->
+            <v-dialog v-model="bulkQuotaDialog" max-width="400">
+                <v-card rounded="lg">
+                    <v-card-title class="text-body-1 font-weight-medium">
+                        批量设置配额 — {{ selectedCount }} 个用户
+                    </v-card-title>
+                    <v-card-text>
+                        <v-text-field v-model.number="bulkQuota" label="每日配额（0=全局默认，-1=无限）" type="number"
+                            variant="outlined" density="compact" :min="-1" />
+                    </v-card-text>
+                    <v-card-actions>
+                        <v-spacer />
+                        <v-btn variant="text" @click="bulkQuotaDialog = false">取消</v-btn>
+                        <v-btn variant="tonal" color="primary" :loading="bulkLoading" @click="doBulkQuota">
+                            确认
+                        </v-btn>
+                    </v-card-actions>
+                </v-card>
+            </v-dialog>
+
+        </div>
+        <!-- / User Management -->
+
+        <!-- ====== Review Tab ====== -->
+        <div class="tab-panel" :class="{ 'tab-panel--active': activeTab === 'review' }">
+            <div class="mt-2">
+                <div v-if="reviewLoading" class="d-flex justify-center py-12">
+                    <v-progress-circular indeterminate color="primary" size="40" width="4" />
+                </div>
+                <v-card v-else variant="tonal" class="bg-surface-container" rounded="xl">
+                    <v-table density="comfortable" hover>
+                        <thead>
+                            <tr>
+                                <th class="text-caption text-on-surface-variant">任务 ID</th>
+                                <th class="text-caption text-on-surface-variant">URL</th>
+                                <th class="text-caption text-on-surface-variant">提交时间</th>
+                                <th class="text-caption text-on-surface-variant">状态</th>
+                                <th class="text-caption text-on-surface-variant text-right">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="task in reviewTasks" :key="task.task_id">
+                                <td class="text-caption text-on-surface-variant font-monospace">
+                                    {{ task.task_id.slice(0, 8) }}…
+                                </td>
+                                <td>
+                                    <span class="text-caption text-truncate d-inline-block" style="max-width: 300px">
+                                        {{ parseTaskUrl(task) }}
+                                    </span>
+                                </td>
+                                <td class="text-caption text-on-surface-variant">
+                                    {{ new Date(task.created_at).toLocaleString('zh-CN') }}
+                                </td>
+                                <td>
+                                    <v-chip size="x-small" :color="reviewStatusChip(task).color">
+                                        {{ reviewStatusChip(task).text }}
+                                    </v-chip>
+                                </td>
+                                <td class="text-right">
+                                    <div class="d-flex ga-1 justify-end">
+                                        <v-btn size="x-small" variant="tonal" color="success" :loading="reviewActing"
+                                            @click="doApprove(task)">
+                                            通过
+                                        </v-btn>
+                                        <v-btn size="x-small" variant="tonal" color="error" :loading="reviewActing"
+                                            @click="doReject(task)">
+                                            拒绝
+                                        </v-btn>
+                                    </div>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </v-table>
+                    <v-card-text v-if="reviewTasks.length === 0" class="text-center py-8 text-on-surface-variant">
+                        暂无待审核任务
+                    </v-card-text>
+                </v-card>
+            </div>
+        </div>
     </div>
 </template>
 
 <style scoped lang="scss">
+.admin-page {
+    position: relative;
+}
+
 .quota-input :deep(input) {
     text-align: center;
+}
+
+.tab-panel {
+    position: absolute;
+    width: 100%;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 0.25s ease, transform 0.25s ease;
+    pointer-events: none;
+    visibility: hidden;
+}
+
+.tab-panel--active {
+    position: relative;
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+    visibility: visible;
 }
 </style>

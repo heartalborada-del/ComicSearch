@@ -51,6 +51,8 @@ face_crop_expand_ratio = 0.15
 face_crop_min_size = 48
 face_crop_max_detections_per_image = 6
 download_timeout_seconds = 60
+# require_review = true            # 开启导入审核，非管理员提交需管理员审批
+# image_serve_root = "comics/served"  # 封面图的 serve 目录
 
 [ehentai.cookies]
 ipb_member_id = "your_member_id"

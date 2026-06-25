@@ -18,18 +18,8 @@ const imageUrl = computed(() => pageUrl(props.packId, props.pageNo))
 
 <template>
   <div class="page-preview">
-    <v-card
-      variant="tonal"
-      class="bg-surface-container state-layer cursor-pointer"
-      rounded="lg"
-      @click="dialog = true"
-    >
-      <v-img
-        :src="imageUrl"
-        aspect-ratio="0.7"
-        cover
-        class="bg-surface-container-high"
-      >
+    <v-card variant="tonal" class="bg-surface-container state-layer cursor-pointer" rounded="lg" @click="dialog = true">
+      <v-img :src="imageUrl" aspect-ratio="0.7" cover class="bg-surface-container-high">
         <template #placeholder>
           <div class="d-flex align-center justify-center fill-height">
             <v-progress-circular indeterminate color="primary" size="32" />
@@ -48,7 +38,7 @@ const imageUrl = computed(() => pageUrl(props.packId, props.pageNo))
 
     <!-- Zoom dialog -->
     <v-dialog v-model="dialog" max-width="900" transition="fade-transition">
-      <v-card rounded="xl" color="surface">
+      <v-card rounded="lg" color="surface">
         <v-toolbar flat class="bg-surface-container">
           <v-toolbar-title class="text-body-1">
             Pack #{{ packId }} — 第 {{ pageNo }} 页
@@ -56,11 +46,7 @@ const imageUrl = computed(() => pageUrl(props.packId, props.pageNo))
           <v-btn icon="mdi-close" variant="text" @click="dialog = false" />
         </v-toolbar>
         <v-card-text class="d-flex justify-center pa-4">
-          <v-img
-            :src="imageUrl"
-            max-height="80vh"
-            contain
-          >
+          <v-img :src="imageUrl" max-height="80vh" contain>
             <template #placeholder>
               <div class="d-flex align-center justify-center fill-height">
                 <v-progress-circular indeterminate color="primary" size="48" />

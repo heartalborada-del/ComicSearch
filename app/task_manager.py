@@ -89,6 +89,7 @@ class TaskManager:
         task_type: str,
         payload: dict[str, Any],
         dedup_statuses: tuple[str, ...] = ("pending", "running"),
+        initial_status: str = "pending",
     ) -> SubmitResult:
         task_id: str | None = None
         status: str | None = None
@@ -115,13 +116,13 @@ class TaskManager:
 
                 if task_id is None:
                     task_id = uuid4().hex
-                    status = "pending"
+                    status = initial_status
                     created = True
                     db.add(
                         ImportTask(
                             task_id=task_id,
                             task_type=task_type,
-                            status="pending",
+                            status=initial_status,
                             user_id=int(user_id) if user_id is not None else None,
                             payload_json=json.dumps(payload, ensure_ascii=False),
                             created_at=self._now_iso(),
@@ -131,9 +132,31 @@ class TaskManager:
 
         assert task_id is not None
         assert status is not None
-        if created:
+        if created and initial_status == "pending":
             self._start_worker(task_id)
         return SubmitResult(task_id=task_id, status=status, created=created)
+
+    def approve(self, task_id: str) -> TaskRecord | None:
+        """Approve a pending_review task → set to pending and start execution."""
+        with self._session_factory() as db:
+            row = db.get(ImportTask, task_id)
+            if row is None or row.status != "pending_review":
+                return None
+            row.status = "pending"
+            db.commit()
+        self._start_worker(task_id)
+        return self.get(task_id)
+
+    def reject(self, task_id: str) -> TaskRecord | None:
+        """Reject a pending_review task → set to cancelled."""
+        with self._session_factory() as db:
+            row = db.get(ImportTask, task_id)
+            if row is None or row.status != "pending_review":
+                return None
+            row.status = "cancelled"
+            row.finished_at = self._now_iso()
+            db.commit()
+        return self.get(task_id)
 
     def _start_worker(self, task_id: str) -> None:
         with self._lock:

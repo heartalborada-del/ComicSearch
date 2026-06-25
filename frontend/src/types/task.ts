@@ -3,7 +3,7 @@
  */
 
 /** Task status values. */
-export type TaskStatus = 'pending' | 'running' | 'success' | 'failed'
+export type TaskStatus = 'pending_review' | 'pending' | 'running' | 'success' | 'failed' | 'cancelled'
 
 /** Task type identifier. */
 export type TaskType = 'ehentai_import' | string
@@ -19,6 +19,7 @@ export interface TaskRecord {
     finished_at: string | null
     result: Record<string, unknown> | null
     error: string | null
+    payload: Record<string, unknown> | null
 }
 
 /** Request body for POST /ehentai/import/tasks. */

@@ -15,10 +15,12 @@ const emit = defineEmits<{
 }>()
 
 const statusConfig: Record<TaskStatus, { color: string; icon: string; label: string }> = {
+  pending_review: { color: 'warning', icon: 'mdi-file-document-edit', label: '待审核' },
   pending: { color: 'grey', icon: 'mdi-clock-outline', label: '等待中' },
   running: { color: 'primary', icon: 'mdi-progress-clock', label: '运行中' },
   success: { color: 'success', icon: 'mdi-check-circle', label: '成功' },
   failed: { color: 'error', icon: 'mdi-alert-circle', label: '失败' },
+  cancelled: { color: '', icon: 'mdi-cancel', label: '已取消' },
 }
 
 const config = computed(() => statusConfig[props.task.status] ?? statusConfig.pending)

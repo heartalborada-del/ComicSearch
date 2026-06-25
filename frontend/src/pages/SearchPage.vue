@@ -62,7 +62,7 @@ function onFileUpdate(file: File | null): void {
 <template>
   <div class="search-page">
     <!-- Upload Section -->
-    <v-card variant="tonal" class="bg-surface-container mb-4 pa-4" rounded="xl">
+    <v-card variant="tonal" class="bg-surface-container mb-4 pa-4" rounded="lg">
       <SearchUpload :file="selectedFile" @update:file="onFileUpdate" />
 
       <!-- Options Toggle -->
