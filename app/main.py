@@ -21,7 +21,7 @@ from app.config import AppSettings, load_settings
 from app.db import create_db_session, get_db, get_engine, init_db
 from app.ehentai_ingest import EhentaiIngestService
 from app.embedder_onnx import OnnxImageEmbedder
-from app.models import ImportTask, Keyword, Pack, PackKeyword, SearchUsage, User
+from app.models import ImportTask, Keyword, LoginRecord, Pack, PackKeyword, SearchUsage, User
 from app.search_service import SearchService
 from app.task_manager import TaskManager
 from app.auth import (
@@ -626,11 +626,13 @@ def create_app(
 
         # Create user
         now = datetime.now(timezone.utc).isoformat()
+        client_ip = request.client.host if request.client else None
         user = User(
             username=username,
             password_hash=hash_password(payload.password),
             is_active=True,
             is_admin=False,
+            registration_ip=client_ip,
             created_at=now,
         )
         db.add(user)
@@ -690,6 +692,12 @@ def create_app(
 
         # Generate token
         token = create_access_token(user.id, user.username, auth_settings)
+
+        # Record login IP
+        client_ip = request.client.host if request.client else "0.0.0.0"
+        db.add(LoginRecord(user_id=user.id, ip_address=client_ip, logged_at=datetime.now(timezone.utc).isoformat()))
+        db.commit()
+
         return TokenResponse(
             access_token=token,
             token_type="bearer",
@@ -722,10 +730,6 @@ def create_app(
         quota_info = get_quota_info(auth_user, db, app.state.runtime.settings.auth)
         return QuotaResponse(**quota_info)
 
-    class SetQuotaRequest(BaseModel):
-        user_id: int
-        daily_quota: int  # -1 for unlimited, 0 to reset to global default
-
     class AdminUserItem(BaseModel):
         id: int
         username: str
@@ -734,13 +738,24 @@ def create_app(
         created_at: str
         daily_quota: int | None
         used_today: int
+        registration_ip: str | None
+        last_login_ips: list[str]
+
+    class BanUserRequest(BaseModel):
+        user_id: int | None = None
+        user_ids: list[int] | None = None
+
+    class SetQuotaRequest(BaseModel):
+        user_id: int | None = None
+        user_ids: list[int] | None = None
+        daily_quota: int = 0  # -1 for unlimited, 0 = use global default
 
     @api_router.get("/auth/users", response_model=list[AdminUserItem])
     async def list_users(
         auth_user: User = Depends(require_admin),
         db: Session = Depends(get_db),
     ) -> list[AdminUserItem]:
-        """Admin: list all users with quota usage."""
+        """Admin: list all users with quota usage and IP info."""
         users = db.execute(
             select(User).order_by(User.id.asc())
         ).scalars().all()
@@ -751,6 +766,25 @@ def create_app(
         ).scalars().all()
         usage_map: dict[int, int] = {row.user_id: row.count for row in usage_rows}
 
+        # Fetch last 3 distinct login IPs per user
+        user_ids = [u.id for u in users]
+        login_ip_map: dict[int, list[str]] = {uid: [] for uid in user_ids}
+        if user_ids:
+            seen: dict[int, set[str]] = {uid: set() for uid in user_ids}
+            login_rows = (
+                db.query(LoginRecord)
+                .filter(LoginRecord.user_id.in_(user_ids))
+                .order_by(LoginRecord.logged_at.desc())
+                .all()
+            )
+            for lr in login_rows:
+                uid = lr.user_id
+                if len(seen[uid]) >= 3:
+                    continue
+                if lr.ip_address not in seen[uid]:
+                    seen[uid].add(lr.ip_address)
+                    login_ip_map[uid].append(lr.ip_address)
+
         return [
             AdminUserItem(
                 id=u.id,
@@ -760,9 +794,56 @@ def create_app(
                 created_at=u.created_at,
                 daily_quota=u.daily_quota,
                 used_today=usage_map.get(u.id, 0),
+                registration_ip=u.registration_ip,
+                last_login_ips=login_ip_map.get(u.id, []),
             )
             for u in users
         ]
+
+    def _resolve_user_ids(payload: BanUserRequest | SetQuotaRequest, db: Session) -> list[User]:
+        if payload.user_ids:
+            users = db.execute(
+                select(User).where(User.id.in_(payload.user_ids)).order_by(User.id.asc())
+            ).scalars().all()
+            return [u for u in users if not u.is_admin]
+        if payload.user_id is not None:
+            target = db.get(User, payload.user_id)
+            if target is None:
+                raise HTTPException(status_code=404, detail=f"user not found: {payload.user_id}")
+            return [] if target.is_admin else [target]
+        raise HTTPException(status_code=400, detail="user_id or user_ids required")
+
+    @api_router.post("/auth/users/ban")
+    async def ban_user(
+        payload: BanUserRequest,
+        auth_user: User = Depends(require_admin),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        """Admin: ban one or many users."""
+        users = _resolve_user_ids(payload, db)
+        count = 0
+        for u in users:
+            u.is_active = False
+            count += 1
+        db.commit()
+        logger.info("admin %s banned %s users", auth_user.username, count)
+        return {"count": count}
+
+    @api_router.post("/auth/users/unban")
+    async def unban_user(
+        payload: BanUserRequest,
+        auth_user: User = Depends(require_admin),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        """Admin: unban one or many users."""
+        users = _resolve_user_ids(payload, db)
+        count = 0
+        for u in users:
+            u.is_active = True
+            count += 1
+        db.commit()
+        logger.info("admin %s unbanned %s users", auth_user.username, count)
+        return {"count": count}
 
     @api_router.post("/auth/quota/set")
     async def set_user_quota(
@@ -770,29 +851,16 @@ def create_app(
         auth_user: User = Depends(require_admin),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
-        """Admin: set per-user daily search quota.  -1 = unlimited, 0 = use global default."""
-
-        target = db.execute(select(User).where(User.id == payload.user_id)).scalar_one_or_none()
-        if target is None:
-            raise HTTPException(status_code=404, detail=f"user not found: {payload.user_id}")
-
-        if payload.daily_quota == 0:
-            target.daily_quota = None  # reset to global default
-        elif payload.daily_quota < 0:
-            target.daily_quota = None  # unlimited (treated as no limit)
-        else:
-            target.daily_quota = payload.daily_quota
+        """Admin: set per-user daily search quota for one or many users."""
+        users = _resolve_user_ids(payload, db)
+        value = None if payload.daily_quota <= 0 else payload.daily_quota
+        count = 0
+        for u in users:
+            u.daily_quota = value
+            count += 1
         db.commit()
-
-        logger.info(
-            "admin %s set quota for user %s to %s",
-            auth_user.username, target.username, target.daily_quota,
-        )
-        return {
-            "user_id": target.id,
-            "username": target.username,
-            "daily_quota": target.daily_quota,
-        }
+        logger.info("admin %s set quota for %s users to %s", auth_user.username, count, value)
+        return {"count": count}
 
     # Include API router with /api prefix
     app.include_router(api_router)

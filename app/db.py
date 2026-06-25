@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from threading import RLock
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import load_settings
 from app.models import Base
 
+_logger = logging.getLogger("uvicorn.error")
 _lock = RLock()
 _engine: Engine | None = None
 SessionLocal = sessionmaker(autoflush=False, autocommit=False, expire_on_commit=False, class_=Session)
@@ -68,7 +70,37 @@ def init_db(config_path: str | None = None) -> None:
     else:
         configure_database()
 
-    Base.metadata.create_all(bind=get_engine())
+    engine = get_engine()
+    Base.metadata.create_all(bind=engine)
+
+    # ---- Lightweight migrations for SQLite (add missing columns) ----
+    if str(engine.url).startswith("sqlite"):
+        _migrate_sqlite(engine)
+
+
+def _migrate_sqlite(engine: Engine) -> None:
+    """Add any columns that exist in the model but not in the live SQLite DB."""
+    inspector = inspect(engine)
+
+    # user.registration_ip
+    user_cols = {c["name"] for c in inspector.get_columns("user")}
+    if "registration_ip" not in user_cols:
+        _logger.info("migration: adding user.registration_ip column")
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE user ADD COLUMN registration_ip VARCHAR(45)"))
+
+    # import_task.user_id
+    task_cols = {c["name"] for c in inspector.get_columns("import_task")}
+    if "user_id" not in task_cols:
+        _logger.info("migration: adding import_task.user_id column")
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE import_task ADD COLUMN user_id INTEGER"))
+
+    # login_record table
+    table_names = inspector.get_table_names()
+    if "login_record" not in table_names:
+        _logger.info("migration: creating login_record table")
+        Base.metadata.tables["login_record"].create(bind=engine)
 
 
 configure_database()

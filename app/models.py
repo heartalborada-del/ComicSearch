@@ -70,6 +70,7 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     daily_quota: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    registration_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
 
     __table_args__ = (
@@ -90,6 +91,22 @@ class SearchUsage(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "usage_date", name="uq_user_date"),
         Index("idx_search_usage_user_date", "user_id", "usage_date"),
+    )
+
+
+class LoginRecord(Base):
+    """Records each successful login with IP and timestamp."""
+
+    __tablename__ = "login_record"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    ip_address: Mapped[str] = mapped_column(String(45), nullable=False)
+    logged_at: Mapped[str] = mapped_column(String, nullable=False)
+
+    __table_args__ = (
+        Index("idx_login_record_user_id", "user_id"),
+        Index("idx_login_record_user_logged", "user_id", "logged_at"),
     )
 
 
