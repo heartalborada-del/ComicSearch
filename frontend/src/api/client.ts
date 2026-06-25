@@ -6,6 +6,17 @@
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
 
+/** Current auth token — set by auth store after login. */
+let _authToken: string | null = null
+
+/**
+ * Set the auth token for all subsequent API requests.
+ * Called by the auth store on login/logout.
+ */
+export function setAuthToken(token: string | null): void {
+    _authToken = token
+}
+
 /** Custom error class for API errors with status code and detail message. */
 export class ApiError extends Error {
     constructor(
@@ -108,14 +119,31 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
     const finalSignal = createTimeoutSignal(timeoutMs, signal)
 
+    // Inject auth token header if available
+    const finalHeaders: Record<string, string> = { ...headers }
+    if (_authToken) {
+        finalHeaders['Authorization'] = `Bearer ${_authToken}`
+    }
+
     const response = await fetch(buildUrl(path), {
         method,
         body,
-        headers,
+        headers: finalHeaders,
         signal: finalSignal,
     })
 
     if (!response.ok) {
+        // Handle 401: redirect to login page
+        if (response.status === 401) {
+            // Dynamic import to avoid circular dependency
+            const { useAuthStore } = await import('@/stores/auth')
+            const authStore = useAuthStore()
+            authStore.clearAuth()
+            const { default: router } = await import('@/router')
+            if (router.currentRoute.value.name !== 'login') {
+                router.push({ name: 'login', query: { redirect: router.currentRoute.value.fullPath } })
+            }
+        }
         throw await extractError(response)
     }
 

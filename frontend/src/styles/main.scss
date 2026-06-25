@@ -89,6 +89,11 @@ body {
     font-size: 0;
 }
 
+/* Fix v-alert prepend icon vertical centering (Vuetify 3) */
+.v-alert__prepend {
+    align-self: center !important;
+}
+
 /* Custom scrollbar — M3 styled */
 ::-webkit-scrollbar {
     width: 8px;

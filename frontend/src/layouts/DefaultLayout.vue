@@ -3,14 +3,18 @@
  * Default layout with responsive navigation.
  * - Desktop (md+): Side navigation drawer (rail mode, expandable)
  * - Mobile (<md): Bottom navigation bar
- * - App bar with title and theme toggle button
+ * - App bar with title, user menu, quota display, and theme toggle
  */
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useDisplay } from 'vuetify'
+import { useRouter } from 'vue-router'
 import { useAppTheme } from '@/composables/useTheme'
+import { useAuthStore } from '@/stores/auth'
 
 const display = useDisplay()
+const router = useRouter()
 const { isDark, toggleTheme } = useAppTheme()
+const authStore = useAuthStore()
 
 const drawer = ref(false)
 
@@ -18,15 +22,51 @@ interface NavItem {
   icon: string
   title: string
   to: string
+  requiresAuth?: boolean
 }
 
 const navItems: NavItem[] = [
   { icon: 'mdi-image-search', title: '搜索', to: '/' },
-  { icon: 'mdi-import', title: '导入', to: '/import' },
-  { icon: 'mdi-format-list-checks', title: '任务', to: '/tasks' },
+  { icon: 'mdi-import', title: '导入', to: '/import', requiresAuth: true },
+  { icon: 'mdi-format-list-checks', title: '任务', to: '/tasks', requiresAuth: true },
 ]
 
+/** Filter nav items: show auth-required items only when auth is disabled or user is logged in. */
+const visibleNavItems = computed(() =>
+  navItems.filter(
+    (item) =>
+      !item.requiresAuth ||
+      !authStore.authEnabled ||
+      authStore.loggedIn,
+  ),
+)
+
 const isMobile = computed(() => display.mdAndDown.value)
+
+const quotaText = computed(() => {
+  if (!authStore.authEnabled || !authStore.loggedIn) return null
+  if (authStore.quotaUnlimited) return '无限'
+  return `${authStore.quotaRemaining}/${authStore.quotaTotal}`
+})
+
+function goToLogin(): void {
+  router.push({ name: 'login', query: { redirect: router.currentRoute.value.fullPath } })
+}
+
+function handleLogout(): void {
+  authStore.logout()
+  router.push({ name: 'search' })
+}
+
+// Watch auth state to refresh quota when logging in
+watch(
+  () => authStore.loggedIn,
+  (newVal) => {
+    if (newVal) {
+      authStore.fetchQuota()
+    }
+  },
+)
 </script>
 
 <template>
@@ -46,6 +86,72 @@ const isMobile = computed(() => display.mdAndDown.value)
       </v-app-bar-title>
 
       <template #append>
+        <!-- Quota Chip (shown when logged in and auth enabled) -->
+        <v-chip
+          v-if="authStore.authEnabled && authStore.loggedIn && quotaText && !isMobile"
+          size="small"
+          variant="tonal"
+          color="primary"
+          class="mr-2"
+        >
+          <v-icon start size="14">mdi-calendar-today</v-icon>
+          {{ quotaText }}
+        </v-chip>
+
+        <!-- User Menu (authenticated) -->
+        <v-menu v-if="authStore.authEnabled && authStore.loggedIn" offset-y>
+          <template #activator="{ props: menuProps }">
+            <v-btn
+              v-bind="menuProps"
+              variant="text"
+              size="small"
+              rounded="lg"
+              class="mr-1"
+            >
+              <v-icon start size="20">mdi-account-circle</v-icon>
+              <span class="d-none d-sm-inline">{{ authStore.user?.username }}</span>
+            </v-btn>
+          </template>
+          <v-list density="compact" min-width="180" rounded="lg">
+            <v-list-item>
+              <v-list-item-title class="font-weight-medium">
+                {{ authStore.user?.username }}
+              </v-list-item-title>
+              <v-list-item-subtitle v-if="authStore.isAdmin">
+                管理员
+              </v-list-item-subtitle>
+            </v-list-item>
+            <v-divider />
+            <v-list-item v-if="authStore.quota" density="compact">
+              <template #prepend>
+                <v-icon size="18" color="primary">mdi-calendar-today</v-icon>
+              </template>
+              <v-list-item-title class="text-body-2">
+                今日配额: {{ quotaText }}
+              </v-list-item-title>
+            </v-list-item>
+            <v-list-item density="compact" @click="handleLogout">
+              <template #prepend>
+                <v-icon size="18" color="error">mdi-logout</v-icon>
+              </template>
+              <v-list-item-title class="text-body-2">退出登录</v-list-item-title>
+            </v-list-item>
+          </v-list>
+        </v-menu>
+
+        <!-- Login Button (unauthenticated, auth enabled) -->
+        <v-btn
+          v-if="authStore.authEnabled && !authStore.loggedIn"
+          variant="tonal"
+          size="small"
+          rounded="lg"
+          prepend-icon="mdi-login"
+          class="mr-1"
+          @click="goToLogin"
+        >
+          登录
+        </v-btn>
+
         <v-btn
           :icon="isDark ? 'mdi-weather-night' : 'mdi-white-balance-sunny'"
           variant="text"
@@ -66,7 +172,7 @@ const isMobile = computed(() => display.mdAndDown.value)
     >
       <v-list nav density="comfortable">
         <v-list-item
-          v-for="item in navItems"
+          v-for="item in visibleNavItems"
           :key="item.to"
           :to="item.to"
           :prepend-icon="item.icon"
@@ -97,7 +203,7 @@ const isMobile = computed(() => display.mdAndDown.value)
       elevation="0"
     >
       <v-btn
-        v-for="item in navItems"
+        v-for="item in visibleNavItems"
         :key="item.to"
         :to="item.to"
         :prepend-icon="item.icon"

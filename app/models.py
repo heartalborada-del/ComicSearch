@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, Date, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -56,6 +56,39 @@ class EHentaiComicInfo(Base):
     __table_args__ = (
         Index("idx_ehentai_current_gid_token", "current_gid", "current_token"),
         Index("idx_ehentai_old_gid_token", "old_gid", "old_token"),
+    )
+
+
+class User(Base):
+    """User account for authentication and quota tracking."""
+
+    __tablename__ = "user"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+
+    __table_args__ = (
+        Index("idx_user_username", "username"),
+    )
+
+
+class SearchUsage(Base):
+    """Daily search usage tracking per user."""
+
+    __tablename__ = "search_usage"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    usage_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "usage_date", name="uq_user_date"),
+        Index("idx_search_usage_user_date", "user_id", "usage_date"),
     )
 
 

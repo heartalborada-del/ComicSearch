@@ -5,6 +5,7 @@ import logging
 import shutil
 import subprocess
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path as FilePath
 from typing import Any, Callable
 
@@ -20,9 +21,22 @@ from app.config import AppSettings, load_settings
 from app.db import create_db_session, get_db, get_engine, init_db
 from app.ehentai_ingest import EhentaiIngestService
 from app.embedder_onnx import OnnxImageEmbedder
-from app.models import Keyword, Pack, PackKeyword
+from app.models import Keyword, Pack, PackKeyword, User
 from app.search_service import SearchService
 from app.task_manager import TaskManager
+from app.auth import (
+    consume_search_quota,
+    create_access_token,
+    decode_access_token,
+    get_current_user_optional,
+    get_quota_info,
+    get_today_usage,
+    hash_password,
+    require_auth,
+    require_search_quota,
+    verify_password,
+    verify_turnstile_token,
+)
 
 
 def _build_frontend(source_dir: FilePath, dist_dir: FilePath) -> bool:
@@ -108,6 +122,48 @@ class TaskStatusResponse(BaseModel):
     finished_at: str | None = None
     result: dict[str, Any] | None = None
     error: str | None = None
+
+
+# ---- Auth Pydantic models ----
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    turnstile_token: str | None = None
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+    turnstile_token: str | None = None
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: dict[str, Any]
+
+
+class UserInfoResponse(BaseModel):
+    id: int
+    username: str
+    is_admin: bool
+    created_at: str
+
+
+class QuotaResponse(BaseModel):
+    auth_enabled: bool
+    daily_quota: int
+    used_today: int
+    remaining: int
+    is_admin: bool
+
+
+class AuthStatusResponse(BaseModel):
+    auth_enabled: bool
+    turnstile_site_key: str | None
+    logged_in: bool
+    user: UserInfoResponse | None
 
 
 def parse_keyword_ids(raw_keyword_ids: str | None) -> list[int]:
@@ -271,6 +327,8 @@ def create_app(
         include_contrast: bool | None = Form(default=None),
         per_view_limit: int | None = Form(default=None),
         top_k_manga: int | None = Form(default=None),
+        auth_user: User = Depends(require_search_quota),
+        db: Session = Depends(get_db),
     ) -> dict[str, Any]:
         if image.content_type not in ALLOWED_IMAGE_CONTENT_TYPES:
             raise HTTPException(
@@ -322,14 +380,24 @@ def create_app(
         candidate_manga = app.state.runtime.search_service.aggregate_manga(points, top_k=top_k_manga)
         best_manga = candidate_manga[0] if candidate_manga else None
 
+        # Consume quota after successful search
+        consume_search_quota(auth_user, db, app.state.runtime.settings.auth)
+
         return {
             "best_manga": best_manga,
             "confidence": app.state.runtime.search_service.confidence(candidate_manga),
             "candidate_manga": candidate_manga,
         }
 
-    @api_router.post("/ehentai/import/tasks", status_code=status.HTTP_202_ACCEPTED, response_model=EhentaiImportTaskSubmitResponse)
-    async def submit_ehentai_import_task(payload: EhentaiImportRequest) -> EhentaiImportTaskSubmitResponse:
+    @api_router.post(
+        "/ehentai/import/tasks",
+        status_code=status.HTTP_202_ACCEPTED,
+        response_model=EhentaiImportTaskSubmitResponse,
+    )
+    async def submit_ehentai_import_task(
+        payload: EhentaiImportRequest,
+        auth_user: User = Depends(require_auth),
+    ) -> EhentaiImportTaskSubmitResponse:
         if app.state.runtime.ehentai_ingest_service is None:
             raise HTTPException(status_code=503, detail="ehentai ingest service is not available")
 
@@ -380,7 +448,10 @@ def create_app(
         )
 
     @api_router.get("/tasks/{task_id}", response_model=TaskStatusResponse)
-    async def get_task_status(task_id: str = Path(..., title="Task ID")) -> TaskStatusResponse:
+    async def get_task_status(
+        task_id: str = Path(..., title="Task ID"),
+        auth_user: User = Depends(require_auth),
+    ) -> TaskStatusResponse:
         manager = app.state.runtime.task_manager
         if manager is None:
             raise HTTPException(status_code=503, detail="task manager is not available")
@@ -395,6 +466,7 @@ def create_app(
     async def list_tasks(
         limit: int = Query(default=50, ge=1, le=500),
         status_value: str | None = Query(default=None, alias="status"),
+        auth_user: User = Depends(require_auth),
     ) -> list[TaskStatusResponse]:
         manager = app.state.runtime.task_manager
         if manager is None:
@@ -404,7 +476,10 @@ def create_app(
         return [_task_record_response(record) for record in records]
 
     @api_router.post("/tasks/{task_id}/cancel", response_model=TaskStatusResponse)
-    async def cancel_task(task_id: str = Path(..., title="Task ID")) -> TaskStatusResponse:
+    async def cancel_task(
+        task_id: str = Path(..., title="Task ID"),
+        auth_user: User = Depends(require_auth),
+    ) -> TaskStatusResponse:
         manager = app.state.runtime.task_manager
         if manager is None:
             raise HTTPException(status_code=503, detail="task manager is not available")
@@ -428,6 +503,184 @@ def create_app(
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
         return _pack_info_response(pack_id=int(id), db=db)
+
+    # ---- Auth endpoints ----
+
+    @api_router.get("/auth/status", response_model=AuthStatusResponse)
+    async def auth_status(
+        request: Request,
+        auth_user: User | None = Depends(get_current_user_optional),
+    ) -> AuthStatusResponse:
+        """Get current auth configuration status and login state."""
+        auth_settings = app.state.runtime.settings.auth
+        logged_in = auth_user is not None
+        user_info: UserInfoResponse | None = None
+        if auth_user is not None:
+            user_info = UserInfoResponse(
+                id=auth_user.id,
+                username=auth_user.username,
+                is_admin=auth_user.is_admin,
+                created_at=auth_user.created_at,
+            )
+        return AuthStatusResponse(
+            auth_enabled=auth_settings.enabled,
+            turnstile_site_key=auth_settings.turnstile_site_key,
+            logged_in=logged_in,
+            user=user_info,
+        )
+
+    @api_router.post("/auth/register", status_code=status.HTTP_201_CREATED, response_model=TokenResponse)
+    async def register(
+        payload: RegisterRequest,
+        request: Request,
+        db: Session = Depends(get_db),
+    ) -> TokenResponse:
+        """Register a new user account."""
+        auth_settings = app.state.runtime.settings.auth
+        if not auth_settings.enabled:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="account system is not enabled",
+            )
+
+        # Verify Turnstile token if configured
+        if auth_settings.turnstile_secret_key and payload.turnstile_token:
+            client_ip = request.client.host if request.client else None
+            await verify_turnstile_token(payload.turnstile_token, auth_settings, client_ip)
+        elif auth_settings.turnstile_secret_key:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="captcha verification required",
+            )
+
+        # Validate username
+        username = payload.username.strip()
+        if len(username) < 2 or len(username) > 32:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="username must be 2-32 characters",
+            )
+        if not username.isalnum() and "_" not in username and "-" not in username:
+            # Allow alphanumeric, underscore and dash
+            allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+            if not set(username).issubset(allowed):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="username can only contain letters, numbers, underscores and dashes",
+                )
+
+        # Validate password
+        if len(payload.password) < 6:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="password must be at least 6 characters",
+            )
+
+        # Check if username exists
+        existing = db.execute(select(User).where(User.username == username)).scalar_one_or_none()
+        if existing is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="username already exists",
+            )
+
+        # Create user
+        now = datetime.now(timezone.utc).isoformat()
+        user = User(
+            username=username,
+            password_hash=hash_password(payload.password),
+            is_active=True,
+            is_admin=False,
+            created_at=now,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+        # Generate token
+        token = create_access_token(user.id, user.username, auth_settings)
+        return TokenResponse(
+            access_token=token,
+            token_type="bearer",
+            user={
+                "id": user.id,
+                "username": user.username,
+                "is_admin": user.is_admin,
+                "created_at": user.created_at,
+            },
+        )
+
+    @api_router.post("/auth/login", response_model=TokenResponse)
+    async def login(
+        payload: LoginRequest,
+        request: Request,
+        db: Session = Depends(get_db),
+    ) -> TokenResponse:
+        """Login with username and password."""
+        auth_settings = app.state.runtime.settings.auth
+        if not auth_settings.enabled:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="account system is not enabled",
+            )
+
+        # Verify Turnstile token if configured
+        if auth_settings.turnstile_secret_key and payload.turnstile_token:
+            client_ip = request.client.host if request.client else None
+            await verify_turnstile_token(payload.turnstile_token, auth_settings, client_ip)
+        elif auth_settings.turnstile_secret_key:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="captcha verification required",
+            )
+
+        # Find user
+        user = db.execute(select(User).where(User.username == payload.username.strip())).scalar_one_or_none()
+        if user is None or not verify_password(payload.password, user.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="invalid username or password",
+            )
+
+        if not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="account is disabled",
+            )
+
+        # Generate token
+        token = create_access_token(user.id, user.username, auth_settings)
+        return TokenResponse(
+            access_token=token,
+            token_type="bearer",
+            user={
+                "id": user.id,
+                "username": user.username,
+                "is_admin": user.is_admin,
+                "created_at": user.created_at,
+            },
+        )
+
+    @api_router.get("/auth/me", response_model=UserInfoResponse)
+    async def me(
+        auth_user: User = Depends(require_auth),
+    ) -> UserInfoResponse:
+        """Get current logged-in user info."""
+        return UserInfoResponse(
+            id=auth_user.id,
+            username=auth_user.username,
+            is_admin=auth_user.is_admin,
+            created_at=auth_user.created_at,
+        )
+
+    @api_router.get("/auth/quota", response_model=QuotaResponse)
+    async def quota(
+        auth_user: User = Depends(require_auth),
+        db: Session = Depends(get_db),
+    ) -> QuotaResponse:
+        """Get current user's search quota status."""
+        quota_info = get_quota_info(auth_user, db, app.state.runtime.settings.auth)
+        return QuotaResponse(**quota_info)
 
     # Include API router with /api prefix
     app.include_router(api_router)

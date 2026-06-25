@@ -20,6 +20,14 @@ collection = "pages"
 [database]
 url = "sqlite:///./comicsearch.db"
 
+[auth]
+enabled = false
+secret_key = "change-me-to-a-random-secret-string"
+token_expire_minutes = 10080
+daily_search_quota = 50
+# turnstile_site_key = "your-turnstile-site-key"
+# turnstile_secret_key = "your-turnstile-secret-key"
+
 [search_defaults]
 robust_partial = true
 include_corners = true

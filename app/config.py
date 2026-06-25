@@ -58,6 +58,16 @@ class EhentaiSettings:
 
 
 @dataclass(frozen=True)
+class AuthSettings:
+    enabled: bool = False
+    secret_key: str = "change-me-in-production"
+    token_expire_minutes: int = 10080  # 7 days
+    daily_search_quota: int = 50
+    turnstile_site_key: str | None = None
+    turnstile_secret_key: str | None = None
+
+
+@dataclass(frozen=True)
 class CorsSettings:
     allow_origins: list[str] = field(default_factory=lambda: ["*"])
 
@@ -77,6 +87,7 @@ class AppSettings:
     database: DatabaseSettings = field(default_factory=DatabaseSettings)
     search: SearchDefaults = field(default_factory=SearchDefaults)
     ehentai: EhentaiSettings = field(default_factory=EhentaiSettings)
+    auth: AuthSettings = field(default_factory=AuthSettings)
     cors: CorsSettings = field(default_factory=CorsSettings)
     frontend: FrontendSettings = field(default_factory=FrontendSettings)
 
@@ -195,6 +206,7 @@ def load_settings(config_path: str | os.PathLike[str] | None = None) -> AppSetti
     database_section = _get_section(file_data, "database")
     search_section = _get_section(file_data, "search_defaults")
     ehentai_section = _get_section(file_data, "ehentai")
+    auth_section = _get_section(file_data, "auth")
     cors_section = _get_section(file_data, "cors")
     frontend_section = _get_section(file_data, "frontend")
 
@@ -304,6 +316,23 @@ def load_settings(config_path: str | os.PathLike[str] | None = None) -> AppSetti
     if database_url:
         database = DatabaseSettings(url=_coerce_str(database_url, field_name="DATABASE_URL"))
 
+    auth = AuthSettings(
+        enabled=_coerce_bool(auth_section.get("enabled", False), field_name="auth.enabled"),
+        secret_key=_coerce_str(auth_section.get("secret_key", "change-me-in-production"), field_name="auth.secret_key"),
+        token_expire_minutes=_coerce_int(
+            auth_section.get("token_expire_minutes", 10080),
+            field_name="auth.token_expire_minutes",
+            min_value=1,
+        ),
+        daily_search_quota=_coerce_int(
+            auth_section.get("daily_search_quota", 50),
+            field_name="auth.daily_search_quota",
+            min_value=0,
+        ),
+        turnstile_site_key=_optional_str(auth_section.get("turnstile_site_key")),
+        turnstile_secret_key=_optional_str(auth_section.get("turnstile_secret_key")),
+    )
+
     cors_allow_origins_raw = cors_section.get("allow_origins", ["*"])
     if isinstance(cors_allow_origins_raw, str):
         cors_allow_origins = [cors_allow_origins_raw]
@@ -326,4 +355,4 @@ def load_settings(config_path: str | os.PathLike[str] | None = None) -> AppSetti
         ),
     )
 
-    return AppSettings(embedder=embedder, qdrant=qdrant, database=database, search=search, ehentai=ehentai, cors=cors, frontend=frontend)
+    return AppSettings(embedder=embedder, qdrant=qdrant, database=database, search=search, ehentai=ehentai, auth=auth, cors=cors, frontend=frontend)
