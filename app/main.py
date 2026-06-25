@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path as FilePath
 from typing import Any, Callable
 
-from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Path, Query, Request, UploadFile, status
+from fastapi import APIRouter, Body, Depends, FastAPI, File, Form, HTTPException, Path, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -166,6 +166,29 @@ class AuthStatusResponse(BaseModel):
     turnstile_site_key: str | None
     logged_in: bool
     user: UserInfoResponse | None
+
+
+class AdminUserItem(BaseModel):
+    id: int
+    username: str
+    is_admin: bool
+    is_active: bool
+    created_at: str
+    daily_quota: int | None
+    used_today: int
+    registration_ip: str | None
+    last_login_ips: list[str]
+
+
+class BanUserRequest(BaseModel):
+    user_id: int | None = None
+    user_ids: list[int] | None = None
+
+
+class SetQuotaRequest(BaseModel):
+    user_id: int | None = None
+    user_ids: list[int] | None = None
+    daily_quota: int = 0  # -1 = unlimited, 0 = use global default
 
 
 def parse_keyword_ids(raw_keyword_ids: str | None) -> list[int]:
@@ -654,8 +677,8 @@ def create_app(
 
     @api_router.post("/auth/login", response_model=TokenResponse)
     async def login(
-        payload: LoginRequest,
         request: Request,
+        payload: LoginRequest = Body(...),
         db: Session = Depends(get_db),
     ) -> TokenResponse:
         """Login with username and password."""
@@ -730,26 +753,6 @@ def create_app(
         quota_info = get_quota_info(auth_user, db, app.state.runtime.settings.auth)
         return QuotaResponse(**quota_info)
 
-    class AdminUserItem(BaseModel):
-        id: int
-        username: str
-        is_admin: bool
-        is_active: bool
-        created_at: str
-        daily_quota: int | None
-        used_today: int
-        registration_ip: str | None
-        last_login_ips: list[str]
-
-    class BanUserRequest(BaseModel):
-        user_id: int | None = None
-        user_ids: list[int] | None = None
-
-    class SetQuotaRequest(BaseModel):
-        user_id: int | None = None
-        user_ids: list[int] | None = None
-        daily_quota: int = 0  # -1 for unlimited, 0 = use global default
-
     @api_router.get("/auth/users", response_model=list[AdminUserItem])
     async def list_users(
         auth_user: User = Depends(require_admin),
@@ -815,7 +818,7 @@ def create_app(
 
     @api_router.post("/auth/users/ban")
     async def ban_user(
-        payload: BanUserRequest,
+        payload: BanUserRequest = Body(...),
         auth_user: User = Depends(require_admin),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
@@ -831,7 +834,7 @@ def create_app(
 
     @api_router.post("/auth/users/unban")
     async def unban_user(
-        payload: BanUserRequest,
+        payload: BanUserRequest = Body(...),
         auth_user: User = Depends(require_admin),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
@@ -847,7 +850,7 @@ def create_app(
 
     @api_router.post("/auth/quota/set")
     async def set_user_quota(
-        payload: SetQuotaRequest,
+        payload: SetQuotaRequest = Body(...),
         auth_user: User = Depends(require_admin),
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
