@@ -66,7 +66,7 @@ watch(
 </script>
 
 <template>
-  <div class="detail-page">
+  <div class="detail-page px-4 px-sm-6 px-md-8">
     <!-- Loading -->
     <div v-if="loading" class="d-flex justify-center py-12">
       <v-progress-circular indeterminate color="primary" size="48" width="4" />
@@ -93,22 +93,17 @@ watch(
     <div v-else-if="packInfo" class="detail-content">
       <v-row>
         <!-- Cover Image -->
-        <v-col cols="12" sm="4" md="3">
-          <v-card variant="tonal" class="bg-surface-container" rounded="xl" overflow="hidden">
-            <v-img
-              :src="coverSrc"
-              aspect-ratio="0.7"
-              cover
-              class="bg-surface-container-high"
-            >
+        <v-col cols="12" sm="3" md="2" class="d-flex justify-center">
+          <v-card variant="tonal" class="bg-surface-container" rounded="xl" max-width="200" overflow="hidden">
+            <v-img :src="coverSrc" aspect-ratio="0.7" cover class="bg-surface-container-high">
               <template #placeholder>
                 <div class="d-flex align-center justify-center fill-height">
-                  <v-icon size="64" color="outline">mdi-book-outline</v-icon>
+                  <v-icon size="48" color="outline">mdi-book-outline</v-icon>
                 </div>
               </template>
               <template #error>
                 <div class="d-flex align-center justify-center fill-height">
-                  <v-icon size="64" color="outline">mdi-book-off-outline</v-icon>
+                  <v-icon size="48" color="outline">mdi-book-off-outline</v-icon>
                 </div>
               </template>
             </v-img>
@@ -116,7 +111,7 @@ watch(
         </v-col>
 
         <!-- Metadata -->
-        <v-col cols="12" sm="8" md="9">
+        <v-col cols="12" sm="9" md="10">
           <div class="text-overline text-on-surface-variant mb-1">
             Pack #{{ packInfo.pack_id }}
           </div>
@@ -126,37 +121,19 @@ watch(
 
           <!-- Source Link -->
           <div v-if="packInfo.source" class="mb-4">
-            <div class="text-subtitle-2 text-on-surface-variant mb-1">来源</div>
-            <v-btn
-              :href="packInfo.source"
-              target="_blank"
-              rel="noopener noreferrer"
-              variant="tonal"
-              color="primary"
-              size="small"
-              prepend-icon="mdi-open-in-new"
-            >
+            <div class="text-subtitle-2 text-on-surface-variant mb-2">来源</div>
+            <a :href="packInfo.source" target="_blank" rel="noopener noreferrer"
+              class="source-link text-body-2 text-truncate d-block">
+              <v-icon start size="16">mdi-open-in-new</v-icon>
               {{ packInfo.source }}
-            </v-btn>
+            </a>
           </div>
 
           <!-- Keywords -->
           <div v-if="packInfo.keywords.length > 0" class="mb-4">
             <div class="text-subtitle-2 text-on-surface-variant mb-2">关键词</div>
             <div class="d-flex flex-wrap ga-2">
-              <KeywordChip
-                v-for="keyword in packInfo.keywords"
-                :key="keyword.id"
-                :keyword="keyword"
-              />
-            </div>
-          </div>
-
-          <!-- Keyword IDs (raw) -->
-          <div v-if="packInfo.keyword_ids.length > 0">
-            <div class="text-subtitle-2 text-on-surface-variant mb-1">关键词 ID</div>
-            <div class="text-body-2 text-on-surface-variant">
-              {{ packInfo.keyword_ids.join(', ') }}
+              <KeywordChip v-for="keyword in packInfo.keywords" :key="keyword.id" :keyword="keyword" />
             </div>
           </div>
         </v-col>
@@ -164,3 +141,21 @@ watch(
     </div>
   </div>
 </template>
+
+<style scoped lang="scss">
+.source-link {
+  color: rgb(var(--v-theme-primary));
+  text-decoration: none;
+  max-width: 100%;
+  padding: 6px 0;
+
+  &:hover {
+    text-decoration: underline;
+  }
+
+  :deep(.v-icon) {
+    opacity: 0.75;
+    vertical-align: -3px;
+  }
+}
+</style>

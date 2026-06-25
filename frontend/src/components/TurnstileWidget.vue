@@ -2,9 +2,13 @@
 /**
  * Turnstile widget component — renders a Cloudflare Turnstile challenge.
  * Emits a verified token on successful completion.
+ *
+ * Handles async siteKey resolution: the parent may provide siteKey after
+ * mount (e.g. after an API call to /auth/status completes), so we watch
+ * for siteKey changes and initialize the widget reactively.
  */
-import { nextTick, onMounted, ref, watch } from 'vue'
-import { loadTurnstileScript, useTurnstile } from '@/composables/useTurnstile'
+import { nextTick, onUnmounted, shallowRef, ref, watch } from 'vue'
+import { loadTurnstileScript, useTurnstile, type TurnstileInstance } from '@/composables/useTurnstile'
 
 const emit = defineEmits<{
   verify: [token: string]
@@ -24,34 +28,56 @@ const props = withDefaults(
 const containerRef = ref<HTMLElement | null>(null)
 const loading = ref(true)
 const loadError = ref<string | null>(null)
+const turnstile = shallowRef<TurnstileInstance | null>(null)
 
-const turnstile = props.siteKey
-  ? useTurnstile(props.siteKey)
-  : null
+/**
+ * Initialise (or re-initialise) the Turnstile widget.
+ * Creates a fresh TurnstileInstance and renders it into the container.
+ */
+async function initTurnstile(): Promise<void> {
+  if (!props.siteKey) return
 
-onMounted(async () => {
-  if (!props.siteKey) {
-    loading.value = false
-    return
-  }
+  // Destroy previous instance if any
+  turnstile.value?.destroy()
+  turnstile.value = null
+
+  loading.value = true
+  loadError.value = null
 
   try {
     await loadTurnstileScript()
+    // Must set loading=false BEFORE nextTick so the v-else-if="siteKey"
+    // branch renders and containerRef binds to the actual DOM element.
+    loading.value = false
     await nextTick()
-    if (containerRef.value && turnstile) {
-      turnstile.render(containerRef.value)
+    if (containerRef.value) {
+      const instance = useTurnstile(props.siteKey)
+      instance.render(containerRef.value)
+      turnstile.value = instance
     }
   } catch (err) {
     loadError.value = '验证码加载失败'
     emit('error', '验证码加载失败')
-  } finally {
     loading.value = false
   }
-})
+}
+
+// Watch siteKey changes — the key may arrive asynchronously after mount
+watch(
+  () => props.siteKey,
+  (newKey) => {
+    if (newKey) {
+      initTurnstile()
+    } else {
+      loading.value = false
+    }
+  },
+  { immediate: true },
+)
 
 // Watch token changes and emit verify
 watch(
-  () => turnstile?.token.value,
+  () => turnstile.value?.token.value,
   (newToken) => {
     if (newToken) {
       emit('verify', newToken)
@@ -63,9 +89,13 @@ watch(
 watch(
   () => props.resetKey,
   () => {
-    turnstile?.reset()
+    turnstile.value?.reset()
   },
 )
+
+onUnmounted(() => {
+  turnstile.value?.destroy()
+})
 </script>
 
 <template>

@@ -233,6 +233,25 @@ class EhentaiIngestService:
     def _dataset_dir(self, gid: int, token: str) -> Path:
         return self._dataset_root() / f"{int(gid)}-{_sanitize_file_component(token)}"
 
+    def _build_serve_cover(self, pack_id: int, first_page_path: Path) -> None:
+        """Copy the first page as cover into image_serve_root/cover/{pack_id}.jpg.
+
+        This matches the frontend URL pattern: /images/cover/{pack_id}
+        The file on disk must be named e.g. `12345.jpg` — nginx try_files
+        handles the extension-less request.
+        """
+        serve_root = Path(self._settings.ehentai.image_serve_root).resolve()
+        cover_dir = serve_root / "cover"
+        cover_dir.mkdir(parents=True, exist_ok=True)
+        dest = cover_dir / f"{pack_id}.jpg"
+        if not dest.exists():
+            try:
+                shutil.copy2(first_page_path, dest)
+            except OSError:
+                logger.exception("failed to copy cover for pack_id=%s", pack_id)
+            else:
+                logger.info("cover written for pack_id=%s -> %s", pack_id, dest)
+
     @staticmethod
     def _select_resample_archive(archives: list[ArchiveInformation]) -> ArchiveInformation:
         for archive in archives:
@@ -720,6 +739,23 @@ class EhentaiIngestService:
                 points.clear()
 
         self._upsert_points(points)
+
+        # --- Copy cover image to the serve directory ---
+        # Frontend expects: {VITE_IMAGE_BASE_URL}/cover/{pack_id}
+        # The serve-root is typically synced/sftp'd to a static file server.
+        try:
+            if archive_image_paths is not None:
+                first_page_path = archive_image_paths[0]
+            elif archive_dataset_dir is not None:
+                dataset_path = Path(archive_dataset_dir)
+                image_paths = _iter_image_paths(dataset_path)
+                first_page_path = image_paths[0] if image_paths else None
+            else:
+                first_page_path = None
+            if first_page_path is not None:
+                self._build_serve_cover(pack_id, first_page_path)
+        except Exception:
+            logger.exception("failed to build cover for pack_id=%s", pack_id)
 
         return {
             "status": "ok",

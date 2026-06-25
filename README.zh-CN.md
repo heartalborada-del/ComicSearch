@@ -34,6 +34,47 @@ pip install -r requirements-directml.txt
 
 不要在同一个 Python 环境里同时安装 `onnxruntime-gpu` 和 `onnxruntime-directml`。如需两种后端，请分别创建虚拟环境。
 
+## Qdrant 安装与设置
+
+ComicSearch 依赖 Qdrant 向量数据库进行图像检索，请先安装并启动 Qdrant 服务。
+
+### 方式一：Docker（推荐）
+
+```bash
+docker run -d \
+  --name qdrant \
+  -p 6333:6333 -p 6334:6334 \
+  -v "$(pwd)/qdrant_data:/qdrant/storage" \
+  qdrant/qdrant
+```
+
+### 方式二：本地安装
+
+```bash
+# 下载 Qdrant 二进制文件
+wget https://github.com/qdrant/qdrant/releases/latest/download/qdrant-x86_64-pc-windows-msvc.zip
+# 解压后运行
+./qdrant.exe
+```
+
+### 创建 Collection
+
+Qdrant 启动后，使用项目提供的脚本创建 collection：
+
+```bash
+python scripts/setup_qdrant.py \
+  --qdrant-url http://127.0.0.1:6333 \
+  --collection pages \
+  --vector-size 512
+```
+
+参数说明：
+- `--qdrant-url`：Qdrant 服务地址（默认 `http://127.0.0.1:6333`）
+- `--collection`：collection 名称（默认 `pages`，需与 `config.toml` 中一致）
+- `--vector-size`：向量维度（默认 `512`，对应 CLIP-ViT-B-16）
+
+Collection 的 host、port、名称需与 `config.toml` 中 `[qdrant]` 段的配置保持一致。
+
 ## 配置
 
 你可以使用 TOML 配置文件来设置启动参数。
@@ -199,7 +240,17 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 然后访问 `http://localhost:8000`——API 和前端从同一端口提供服务。
 
-如需禁用（例如开发时使用 `npm run dev`），设置 `enabled = false`。
+如需禁用前端，仅提供 API 服务（纯后端模式），在 `config.toml` 中设置：
+
+```toml
+[frontend]
+enabled = false
+```
+
+禁用后，访问根路径 `/` 将返回 API 信息而非前端页面。此模式适用于：
+- 开发时使用 `npm run dev` 单独启动前端开发服务器
+- 使用 Nginx 等外部 Web 服务器托管前端（见下方 Nginx 部署）
+- 仅作为 API 服务使用，不提供 Web 界面
 
 ### Nginx 部署（前后端分离）
 

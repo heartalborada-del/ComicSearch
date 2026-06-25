@@ -1,13 +1,23 @@
 /**
  * Cloudflare Turnstile composable.
  * Loads the Turnstile script and provides a callback-based token refresh API.
+ * Each call to useTurnstile() creates an independent widget instance.
  */
-import { onUnmounted, ref } from 'vue'
+import { onUnmounted, ref, type Ref } from 'vue'
 
 const TURNSTILE_SCRIPT_URL = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
 
 let scriptLoadPromise: Promise<void> | null = null
-let widgetId: string | null = null
+
+/** Public API surface of a Turnstile widget instance. */
+export interface TurnstileInstance {
+    token: Ref<string | null>
+    error: Ref<string | null>
+    expired: Ref<boolean>
+    render: (container: HTMLElement) => void
+    reset: () => void
+    destroy: () => void
+}
 
 /**
  * Load the Cloudflare Turnstile script if not already loaded.
@@ -41,10 +51,11 @@ export function loadTurnstileScript(): Promise<void> {
 /**
  * Composable for managing a single Turnstile widget instance.
  */
-export function useTurnstile(siteKey: string) {
+export function useTurnstile(siteKey: string): TurnstileInstance {
     const token = ref<string | null>(null)
     const error = ref<string | null>(null)
     const expired = ref(false)
+    let widgetId: string | null = null
 
     /**
      * Callback invoked by Turnstile on successful verification.

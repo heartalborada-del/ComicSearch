@@ -20,8 +20,12 @@ logger = logging.getLogger("uvicorn.error")
 
 ALGORITHM = "HS256"
 TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+IP_QUOTA_MULTIPLIER = 10
 
 _bearer_scheme = HTTPBearer(auto_error=False)
+
+# ---- In-memory IP usage tracker (not persisted) ----
+_ip_usage: dict[str, dict[str, int]] = {}  # {date: {ip: count}}
 
 
 def hash_password(password: str) -> str:
@@ -105,6 +109,65 @@ def _today_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _quota_reset_at() -> str:
+    """Return the ISO timestamp of the next UTC midnight (quota reset time)."""
+    now = datetime.now(timezone.utc)
+    tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return tomorrow.isoformat()
+
+
+def _get_user_quota(user: User, settings: AuthSettings) -> int:
+    """Get the effective daily quota for a user.
+
+    Priority: user.daily_quota (if set) > settings.daily_search_quota > 0 (unlimited).
+    """
+    if user.daily_quota is not None:
+        return user.daily_quota
+    return settings.daily_search_quota
+
+
+def _check_ip_quota(request: Request, settings: AuthSettings) -> None:
+    """Enforce per-IP daily limit (user_quota * 10).
+
+    Only applies when auth is enabled and user is not authenticated.
+    """
+    if not settings.enabled:
+        return
+    if settings.daily_search_quota <= 0:
+        return
+
+    client_ip = request.client.host if request.client else None
+    if client_ip is None:
+        return
+
+    ip_limit = settings.daily_search_quota * IP_QUOTA_MULTIPLIER
+    today = _today_str()
+
+    # Clean stale entries
+    stale = [d for d in _ip_usage if d != today]
+    for d in stale:
+        del _ip_usage[d]
+
+    day_map = _ip_usage.setdefault(today, {})
+    count = day_map.get(client_ip, 0)
+    if count >= ip_limit:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"IP daily search quota exceeded ({ip_limit}/day)",
+        )
+
+
+def _increment_ip_quota(request: Request, settings: AuthSettings) -> None:
+    """Increment the per-IP daily usage counter."""
+    if not settings.enabled:
+        return
+    client_ip = request.client.host if request.client else None
+    if client_ip is None:
+        return
+    today = _today_str()
+    _ip_usage.setdefault(today, {})[client_ip] = _ip_usage.setdefault(today, {}).get(client_ip, 0) + 1
+
+
 def get_today_usage(db: Session, user_id: int) -> SearchUsage:
     """Get or create today's search usage record for a user."""
     today = _today_str()
@@ -183,30 +246,60 @@ def require_auth(
     return user
 
 
-def require_search_quota(
+def require_admin(
     request: Request,
     user: User = Depends(require_auth),
-    db: Session = Depends(get_db),
 ) -> User:
-    """Dependency that checks the user's daily search quota.
+    """Dependency that requires the current user to be an admin.
 
-    When auth is disabled, quota is not enforced.
+    When auth is disabled the dummy admin user is always returned.
     """
     settings = request.app.state.runtime.settings
     if not settings.auth.enabled:
         return user
 
+    if not user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="admin privileges required",
+        )
+
+    return user
+
+
+def require_search_quota(
+    request: Request,
+    user: User = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> User:
+    """Dependency that checks the user's daily search quota + per-IP limit.
+
+    - Authenticated users: checked against their effective daily quota
+      (user.daily_quota or the global default).
+    - Unauthenticated (auth disabled): IP-based limit applies.
+    - Admins are exempt.
+    """
+    settings = request.app.state.runtime.settings
+    if not settings.auth.enabled:
+        # Auth disabled — use IP-based limiting only
+        _check_ip_quota(request, settings)
+        return user
+
     if user.is_admin:
         return user
 
-    if settings.auth.daily_search_quota <= 0:
-        return user
+    # Per-IP quota check (always, for both auth and non-auth)
+    _check_ip_quota(request, settings)
+
+    quota = _get_user_quota(user, settings)
+    if quota <= 0:
+        return user  # unlimited
 
     usage = get_today_usage(db, user.id)
-    if usage.count >= settings.auth.daily_search_quota:
+    if usage.count >= quota:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"daily search quota exceeded ({settings.auth.daily_search_quota}/day)",
+            detail=f"daily search quota exceeded ({quota}/day)",
         )
 
     return user
@@ -216,8 +309,12 @@ def consume_search_quota(
     user: User,
     db: Session,
     settings: AuthSettings,
+    request: Request | None = None,
 ) -> None:
-    """Increment the user's daily search usage counter."""
+    """Increment the user's daily search usage counter + IP counter."""
+    if request is not None:
+        _increment_ip_quota(request, settings)
+
     if not settings.enabled:
         return
     if user.is_admin:
@@ -234,6 +331,8 @@ def get_quota_info(
     settings: AuthSettings,
 ) -> dict[str, Any]:
     """Return quota information for the current user."""
+    reset_at = _quota_reset_at()
+
     if not settings.enabled:
         return {
             "auth_enabled": False,
@@ -241,6 +340,7 @@ def get_quota_info(
             "used_today": 0,
             "remaining": 0,
             "is_admin": True,
+            "quota_reset_at": reset_at,
         }
 
     if user.is_admin:
@@ -250,10 +350,11 @@ def get_quota_info(
             "used_today": 0,
             "remaining": -1,
             "is_admin": True,
+            "quota_reset_at": reset_at,
         }
 
+    quota = _get_user_quota(user, settings)
     usage = get_today_usage(db, user.id)
-    quota = settings.daily_search_quota
     remaining = max(0, quota - usage.count) if quota > 0 else -1
 
     return {
@@ -262,4 +363,5 @@ def get_quota_info(
         "used_today": usage.count,
         "remaining": remaining,
         "is_admin": False,
+        "quota_reset_at": reset_at,
     }

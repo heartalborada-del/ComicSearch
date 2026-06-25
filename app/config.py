@@ -54,6 +54,7 @@ class EhentaiSettings:
     face_crop_max_detections_per_image: int = 6
     download_timeout_seconds: float = 60.0
     archive_extract_root: str = "comics/origin/ehentai"
+    image_serve_root: str = "comics/served"
     allow_archive_fallback: bool = False
 
 
@@ -285,6 +286,13 @@ def load_settings(config_path: str | os.PathLike[str] | None = None) -> AppSetti
             _coerce_str(
                 ehentai_section.get("archive_extract_root", "comics/origin/ehentai"),
                 field_name="ehentai.archive_extract_root",
+            ),
+            base_dir=base_dir,
+        ),
+        image_serve_root=_resolve_relative_path(
+            _coerce_str(
+                ehentai_section.get("image_serve_root", "comics/served"),
+                field_name="ehentai.image_serve_root",
             ),
             base_dir=base_dir,
         ),

@@ -44,6 +44,18 @@ server {
         proxy_set_header Connection "upgrade";
     }
 
+    # --- Image serving (extension-less URLs) ---
+    # Frontend requests: /images/cover/12345  and  /images/page/12345/3
+    # Files on disk:      cover/12345.jpg       and  page/12345/3.jpg
+    # nginx try_files tries common extensions in order.
+    location /images/ {
+        alias /var/www/comicsearch-images/;
+        expires 30d;
+        add_header Cache-Control "public, max-age=2592000";
+        # Try: exact match first, then common image extensions
+        try_files $uri $uri.jpg $uri.png $uri.webp $uri.jpeg =404;
+    }
+
     # SPA fallback — all non-file, non-API routes serve index.html
     # This ensures /tasks, /info/123, /import etc. work on direct access/refresh
     location / {

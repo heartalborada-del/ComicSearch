@@ -27,6 +27,39 @@ export const useAuthStore = defineStore('auth', () => {
     const quotaTotal = computed(() => quota.value?.daily_quota ?? 0)
     const quotaUnlimited = computed(() => quota.value?.is_admin === true || quota.value?.remaining === -1)
 
+    /** Formatted quota reset time in local timezone (e.g. "08:00"). */
+    const quotaResetTime = computed(() => {
+        const resetAt = quota.value?.quota_reset_at
+        if (!resetAt) return null
+        try {
+            const d = new Date(resetAt)
+            return d.toLocaleTimeString('zh-CN', {
+                hour: '2-digit',
+                minute: '2-digit',
+            })
+        } catch {
+            return null
+        }
+    })
+
+    /** Quota reset relative description (e.g. "8小时后重置"). */
+    const quotaResetRelative = computed(() => {
+        const resetAt = quota.value?.quota_reset_at
+        if (!resetAt) return null
+        try {
+            const resetDate = new Date(resetAt)
+            const now = new Date()
+            const diffMs = resetDate.getTime() - now.getTime()
+            if (diffMs <= 0) return '即将重置'
+            const hours = Math.floor(diffMs / 3600000)
+            const minutes = Math.floor((diffMs % 3600000) / 60000)
+            if (hours > 0) return `${hours}小时${minutes}分钟后重置`
+            return `${minutes}分钟后重置`
+        } catch {
+            return null
+        }
+    })
+
     /**
      * Check auth status from server and load persisted token.
      */
@@ -185,6 +218,8 @@ export const useAuthStore = defineStore('auth', () => {
         quotaUsed,
         quotaTotal,
         quotaUnlimited,
+        quotaResetTime,
+        quotaResetRelative,
         checkAuthStatus,
         fetchQuota,
         register,

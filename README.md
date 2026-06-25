@@ -36,6 +36,47 @@ pip install -r requirements-directml.txt
 
 Do not install `onnxruntime-gpu` and `onnxruntime-directml` in the same environment. Use separate virtual environments for each backend.
 
+## Qdrant Setup
+
+ComicSearch depends on a Qdrant vector database for image retrieval. Install and start Qdrant first.
+
+### Option 1: Docker (recommended)
+
+```bash
+docker run -d \
+  --name qdrant \
+  -p 6333:6333 -p 6334:6334 \
+  -v "$(pwd)/qdrant_data:/qdrant/storage" \
+  qdrant/qdrant
+```
+
+### Option 2: Native install
+
+```bash
+# Download Qdrant binary
+wget https://github.com/qdrant/qdrant/releases/latest/download/qdrant-x86_64-pc-windows-msvc.zip
+# Extract and run
+./qdrant.exe
+```
+
+### Create Collection
+
+After Qdrant is running, use the bundled script to create the collection:
+
+```bash
+python scripts/setup_qdrant.py \
+  --qdrant-url http://127.0.0.1:6333 \
+  --collection pages \
+  --vector-size 512
+```
+
+Parameters:
+- `--qdrant-url`: Qdrant service URL (default `http://127.0.0.1:6333`)
+- `--collection`: Collection name (default `pages`, must match `config.toml`)
+- `--vector-size`: Vector dimension (default `512`, for CLIP-ViT-B-16)
+
+The collection host, port, and name must match the `[qdrant]` section in `config.toml`.
+
 ## Configuration
 
 You can configure startup parameters with a TOML file.
@@ -201,7 +242,17 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 Then visit `http://localhost:8000` — both API and frontend are served from the same port.
 
-To disable (e.g. for development with `npm run dev`), set `enabled = false`.
+To disable the frontend and run API-only (headless mode), set in `config.toml`:
+
+```toml
+[frontend]
+enabled = false
+```
+
+When disabled, the root path `/` returns API info instead of the frontend. Use this mode when:
+- Developing with `npm run dev` as a separate frontend dev server
+- Serving the frontend via Nginx or another external web server (see Nginx deployment below)
+- Running as a pure API service without a web UI
 
 ### Nginx Deployment (Frontend + Backend Separate)
 

@@ -32,6 +32,7 @@ export interface QuotaResponse {
     used_today: number
     remaining: number
     is_admin: boolean
+    quota_reset_at: string | null
 }
 
 /** Request body for POST /auth/register. */

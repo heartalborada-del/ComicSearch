@@ -66,6 +66,7 @@ class TaskManager:
     def submit(self, task_type: str, payload: dict[str, Any]) -> str:
         task_id = uuid4().hex
         created_at = self._now_iso()
+        user_id = payload.pop("user_id", None)
 
         with self._session_factory() as db:
             db.add(
@@ -73,6 +74,7 @@ class TaskManager:
                     task_id=task_id,
                     task_type=task_type,
                     status="pending",
+                    user_id=int(user_id) if user_id is not None else None,
                     payload_json=json.dumps(payload, ensure_ascii=False),
                     created_at=created_at,
                 )
@@ -91,6 +93,7 @@ class TaskManager:
         task_id: str | None = None
         status: str | None = None
         created = False
+        user_id = payload.pop("user_id", None)
 
         with self._lock:
             with self._session_factory() as db:
@@ -119,6 +122,7 @@ class TaskManager:
                             task_id=task_id,
                             task_type=task_type,
                             status="pending",
+                            user_id=int(user_id) if user_id is not None else None,
                             payload_json=json.dumps(payload, ensure_ascii=False),
                             created_at=self._now_iso(),
                         )

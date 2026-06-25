@@ -69,6 +69,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    daily_quota: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
 
     __table_args__ = (
@@ -98,6 +99,7 @@ class ImportTask(Base):
     task_id: Mapped[str] = mapped_column(String, primary_key=True)
     task_type: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     payload_json: Mapped[str] = mapped_column(String, nullable=False)
     result_json: Mapped[str | None] = mapped_column(String, nullable=True)
     error: Mapped[str | None] = mapped_column(String, nullable=True)

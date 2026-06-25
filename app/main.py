@@ -21,7 +21,7 @@ from app.config import AppSettings, load_settings
 from app.db import create_db_session, get_db, get_engine, init_db
 from app.ehentai_ingest import EhentaiIngestService
 from app.embedder_onnx import OnnxImageEmbedder
-from app.models import Keyword, Pack, PackKeyword, User
+from app.models import ImportTask, Keyword, Pack, PackKeyword, User
 from app.search_service import SearchService
 from app.task_manager import TaskManager
 from app.auth import (
@@ -32,6 +32,7 @@ from app.auth import (
     get_quota_info,
     get_today_usage,
     hash_password,
+    require_admin,
     require_auth,
     require_search_quota,
     verify_password,
@@ -157,6 +158,7 @@ class QuotaResponse(BaseModel):
     used_today: int
     remaining: int
     is_admin: bool
+    quota_reset_at: str | None = None
 
 
 class AuthStatusResponse(BaseModel):
@@ -381,7 +383,7 @@ def create_app(
         best_manga = candidate_manga[0] if candidate_manga else None
 
         # Consume quota after successful search
-        consume_search_quota(auth_user, db, app.state.runtime.settings.auth)
+        consume_search_quota(auth_user, db, app.state.runtime.settings.auth, request=request)
 
         return {
             "best_manga": best_manga,
@@ -419,7 +421,11 @@ def create_app(
         for request_url in request_urls:
             submit_result = manager.submit_or_get_existing(
                 task_type="ehentai_import",
-                payload={"url": request_url, "crop_faces": bool(payload.crop_faces)},
+                payload={
+                    "url": request_url,
+                    "crop_faces": bool(payload.crop_faces),
+                    "user_id": auth_user.id,
+                },
             )
             is_duplicate = not bool(submit_result.created)
             response_status = "duplicate" if is_duplicate else submit_result.status
@@ -451,6 +457,7 @@ def create_app(
     async def get_task_status(
         task_id: str = Path(..., title="Task ID"),
         auth_user: User = Depends(require_auth),
+        db: Session = Depends(get_db),
     ) -> TaskStatusResponse:
         manager = app.state.runtime.task_manager
         if manager is None:
@@ -460,6 +467,14 @@ def create_app(
         if record is None:
             raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
 
+        # Non-admins can only view their own tasks
+        if not auth_user.is_admin:
+            task_row = db.execute(
+                select(ImportTask).where(ImportTask.task_id == task_id)
+            ).scalar_one_or_none()
+            if task_row is not None and task_row.user_id is not None and task_row.user_id != auth_user.id:
+                raise HTTPException(status_code=403, detail="can only view your own tasks")
+
         return _task_record_response(record)
 
     @api_router.get("/tasks", response_model=list[TaskStatusResponse])
@@ -467,22 +482,47 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=500),
         status_value: str | None = Query(default=None, alias="status"),
         auth_user: User = Depends(require_auth),
+        db: Session = Depends(get_db),
     ) -> list[TaskStatusResponse]:
         manager = app.state.runtime.task_manager
         if manager is None:
             raise HTTPException(status_code=503, detail="task manager is not available")
 
         records = manager.list_tasks(limit=int(limit), status_filter=status_value)
+
+        # Non-admins: only show their own tasks
+        if not auth_user.is_admin:
+            task_rows = db.execute(
+                select(ImportTask.task_id, ImportTask.user_id)
+                .where(ImportTask.task_id.in_([r.task_id for r in records]))
+            ).all()
+            user_task_ids = {
+                row.task_id for row in task_rows
+                if row.user_id is None or row.user_id == auth_user.id
+            }
+            records = [r for r in records if r.task_id in user_task_ids]
+
         return [_task_record_response(record) for record in records]
 
     @api_router.post("/tasks/{task_id}/cancel", response_model=TaskStatusResponse)
     async def cancel_task(
         task_id: str = Path(..., title="Task ID"),
         auth_user: User = Depends(require_auth),
+        db: Session = Depends(get_db),
     ) -> TaskStatusResponse:
         manager = app.state.runtime.task_manager
         if manager is None:
             raise HTTPException(status_code=503, detail="task manager is not available")
+
+        # Non-admins can only cancel their own tasks
+        if not auth_user.is_admin:
+            task_row = db.execute(
+                select(ImportTask).where(ImportTask.task_id == task_id)
+            ).scalar_one_or_none()
+            if task_row is None:
+                raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
+            if task_row.user_id is not None and task_row.user_id != auth_user.id:
+                raise HTTPException(status_code=403, detail="can only cancel your own tasks")
 
         record = manager.cancel(task_id)
         if record is None:
@@ -681,6 +721,78 @@ def create_app(
         """Get current user's search quota status."""
         quota_info = get_quota_info(auth_user, db, app.state.runtime.settings.auth)
         return QuotaResponse(**quota_info)
+
+    class SetQuotaRequest(BaseModel):
+        user_id: int
+        daily_quota: int  # -1 for unlimited, 0 to reset to global default
+
+    class AdminUserItem(BaseModel):
+        id: int
+        username: str
+        is_admin: bool
+        is_active: bool
+        created_at: str
+        daily_quota: int | None
+        used_today: int
+
+    @api_router.get("/auth/users", response_model=list[AdminUserItem])
+    async def list_users(
+        auth_user: User = Depends(require_admin),
+        db: Session = Depends(get_db),
+    ) -> list[AdminUserItem]:
+        """Admin: list all users with quota usage."""
+        users = db.execute(
+            select(User).order_by(User.id.asc())
+        ).scalars().all()
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        usage_rows = db.execute(
+            select(SearchUsage).where(SearchUsage.usage_date == today)
+        ).scalars().all()
+        usage_map: dict[int, int] = {row.user_id: row.count for row in usage_rows}
+
+        return [
+            AdminUserItem(
+                id=u.id,
+                username=u.username,
+                is_admin=u.is_admin,
+                is_active=u.is_active,
+                created_at=u.created_at,
+                daily_quota=u.daily_quota,
+                used_today=usage_map.get(u.id, 0),
+            )
+            for u in users
+        ]
+
+    @api_router.post("/auth/quota/set")
+    async def set_user_quota(
+        payload: SetQuotaRequest,
+        auth_user: User = Depends(require_admin),
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        """Admin: set per-user daily search quota.  -1 = unlimited, 0 = use global default."""
+
+        target = db.execute(select(User).where(User.id == payload.user_id)).scalar_one_or_none()
+        if target is None:
+            raise HTTPException(status_code=404, detail=f"user not found: {payload.user_id}")
+
+        if payload.daily_quota == 0:
+            target.daily_quota = None  # reset to global default
+        elif payload.daily_quota < 0:
+            target.daily_quota = None  # unlimited (treated as no limit)
+        else:
+            target.daily_quota = payload.daily_quota
+        db.commit()
+
+        logger.info(
+            "admin %s set quota for user %s to %s",
+            auth_user.username, target.username, target.daily_quota,
+        )
+        return {
+            "user_id": target.id,
+            "username": target.username,
+            "daily_quota": target.daily_quota,
+        }
 
     # Include API router with /api prefix
     app.include_router(api_router)
