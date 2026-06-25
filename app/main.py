@@ -21,7 +21,7 @@ from app.config import AppSettings, load_settings
 from app.db import create_db_session, get_db, get_engine, init_db
 from app.ehentai_ingest import EhentaiIngestService
 from app.embedder_onnx import OnnxImageEmbedder
-from app.models import ImportTask, Keyword, Pack, PackKeyword, User
+from app.models import ImportTask, Keyword, Pack, PackKeyword, SearchUsage, User
 from app.search_service import SearchService
 from app.task_manager import TaskManager
 from app.auth import (
