@@ -1,9 +1,9 @@
 /**
  * Image URL builder utility.
  * Constructs full image URLs from VITE_IMAGE_BASE_URL for:
- * - Cover thumbnails (by pack_id)
- * - Matched page previews (by pack_id + page_no)
- * - E-Hentai original pages (by source URL or gid/token)
+ * - Cover thumbnails (by pack_id) → /served/cover/{pack_id}
+ * - Matched page previews (from Qdrant origin_source_path) → /{originPath}
+ * - Legacy: page previews (by pack_id + page_no)
  */
 
 const IMAGE_BASE_URL = import.meta.env.VITE_IMAGE_BASE_URL || ''
@@ -14,17 +14,28 @@ const IMAGE_BASE_URL = import.meta.env.VITE_IMAGE_BASE_URL || ''
  * @returns Full URL to the cover thumbnail image
  */
 export function coverUrl(packId: number): string {
-    return `${IMAGE_BASE_URL}/cover/${packId}`
+    return `${IMAGE_BASE_URL}/served/cover/${packId}`
 }
 
 /**
- * Build a page preview URL for a specific page in a pack.
+ * Build an origin image URL from a relative path stored in Qdrant.
+ * @param originPath - Relative path from Caddy root (e.g. "origin/ehentai/389-f805/page_0001.jpg")
+ * @returns Full URL to the origin page image
+ */
+export function originImageUrl(originPath: string | null | undefined): string {
+    if (!originPath) return ''
+    if (originPath.startsWith('http://') || originPath.startsWith('https://')) return originPath
+    return `${IMAGE_BASE_URL}/${originPath}`
+}
+
+/**
+ * Build a page preview URL for a specific page in a pack (legacy fallback).
  * @param packId - The pack ID
  * @param pageNo - The page number (1-indexed)
  * @returns Full URL to the page image
  */
 export function pageUrl(packId: number, pageNo: number): string {
-    return `${IMAGE_BASE_URL}/page/${packId}/${pageNo}`
+    return `${IMAGE_BASE_URL}/served/page/${packId}/${pageNo}`
 }
 
 /**
@@ -34,7 +45,7 @@ export function pageUrl(packId: number, pageNo: number): string {
  * @returns Full URL to the page thumbnail image
  */
 export function pageThumbUrl(packId: number, pageNo: number): string {
-    return `${IMAGE_BASE_URL}/page/${packId}/${pageNo}/thumb`
+    return `${IMAGE_BASE_URL}/served/page/${packId}/${pageNo}/thumb`
 }
 
 /**

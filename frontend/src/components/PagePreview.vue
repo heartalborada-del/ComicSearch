@@ -1,19 +1,30 @@
 <script setup lang="ts">
 /**
  * Page preview — displays a matched page image with click-to-zoom dialog.
- * Uses pack_id + page_no to construct the image URL.
+ * Uses origin_source_path from Qdrant payload for the image URL,
+ * falling back to the legacy pack_id + page_no pattern.
  */
 import { computed, ref } from 'vue'
-import { pageUrl } from '@/utils/image-url'
+import { pageUrl, originImageUrl } from '@/utils/image-url'
 
-const props = defineProps<{
-  packId: number
-  pageNo: number
-}>()
+const props = withDefaults(
+  defineProps<{
+    packId: number
+    pageNo: number
+    /** Relative origin path from Qdrant payload (e.g. "origin/ehentai/389-f805/page_0001.jpg"). */
+    originPath?: string | null
+  }>(),
+  {
+    originPath: null,
+  },
+)
 
 const dialog = ref(false)
 
-const imageUrl = computed(() => pageUrl(props.packId, props.pageNo))
+const imageUrl = computed(() => {
+  if (props.originPath) return originImageUrl(props.originPath)
+  return pageUrl(props.packId, props.pageNo)
+})
 </script>
 
 <template>

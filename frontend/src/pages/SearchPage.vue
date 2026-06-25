@@ -156,7 +156,8 @@ function onFileUpdate(file: File | null): void {
           <!-- Page Preview for best match -->
           <v-col v-if="bestManga.top_page_no !== null" cols="12" sm="6" md="4" lg="3">
             <div class="text-subtitle-2 mb-2">匹配页面预览</div>
-            <PagePreview :pack-id="bestManga.pack_id" :page-no="bestManga.top_page_no" />
+            <PagePreview :pack-id="bestManga.pack_id" :page-no="bestManga.top_page_no"
+              :origin-path="bestManga.top_page_origin_path" />
           </v-col>
         </v-row>
       </div>

@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TAG_MAP_OUTPUT = PROJECT_ROOT / "tag_id_map.json"
+DEFAULT_SERVED_ORIGIN_BASE = PROJECT_ROOT / "comics"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -290,6 +291,7 @@ def iter_page_items(
     metadata_by_root: dict[Path, DatasetMetadata],
     tag_id_map: dict[str, int],
     image_name_lists_by_root: dict[Path, list[str]],
+    served_origin_base: Path | None = None,
 ) -> Iterable[IndexItem]:
     for dataset_root in dataset_roots:
         dataset_root_resolved = dataset_root.resolve()
@@ -315,12 +317,17 @@ def iter_page_items(
             relative_name = str(image_path.relative_to(dataset_root_resolved))
             pack_id = parse_int_from_tokens(path_str, "pack")
             page_no = parse_page_no(relative_name, all_names)
-            payload = {
+            payload: dict[str, Any] = {
                 "pack_id": pack_id,
                 "keyword_ids": build_keyword_ids(dataset_metadata.tags, tag_id_map, path_str),
                 "page_no": page_no,
                 "source_type": "page",
             }
+            if served_origin_base is not None:
+                try:
+                    payload["origin_source_path"] = str(image_path.resolve().relative_to(served_origin_base))
+                except ValueError:
+                    pass  # image not under served_origin_base, skip
             yield IndexItem(
                 point_id=make_point_id("page", image_path),
                 image_path=image_path,
@@ -561,6 +568,7 @@ def run_indexing(args: argparse.Namespace) -> None:
     state_path = Path(args.resume_state).resolve()
     tag_map_output_path = Path(args.tag_map_output).resolve()
     processed_ids = set() if args.reset_state else load_state(state_path)
+    served_origin_base = Path(args.served_origin_base).resolve() if args.served_origin_base else DEFAULT_SERVED_ORIGIN_BASE.resolve()
 
     db_url = args.db_url or os.getenv("DATABASE_URL", "sqlite:///./comicsearch.db")
     engine = create_engine(db_url)
@@ -576,7 +584,7 @@ def run_indexing(args: argparse.Namespace) -> None:
         auto_added_tag_count = ensure_metadata_tags_mapped(metadata_by_root, tag_id_map, keyword_names_by_id)
         upsert_tag_registry(db, keyword_names_by_id)
 
-        for item in iter_page_items(dataset_roots, metadata_by_root, tag_id_map, image_name_lists_by_root):
+        for item in iter_page_items(dataset_roots, metadata_by_root, tag_id_map, image_name_lists_by_root, served_origin_base):
             if item.point_id in processed_ids or not item.image_path.exists():
                 continue
             all_items.append(item)
@@ -619,6 +627,17 @@ def run_indexing(args: argparse.Namespace) -> None:
         intra_threads=int(args.embedder_intra_threads),
     )
     client = QdrantClient(url=args.qdrant_url)
+
+    if args.clear_collection:
+        try:
+            client.delete(
+                collection_name=args.collection,
+                points_selector=qm.Filter(must=[]),
+                wait=True,
+            )
+            print(json.dumps({"status": "cleared", "collection": args.collection}))
+        except Exception:
+            pass  # collection may not exist yet
 
     indexed = 0
     for embed_batch_items in batch_iter(all_items, int(args.embed_batch_size)):
@@ -677,6 +696,7 @@ def parse_args() -> argparse.Namespace:
         help="State file path for resumable indexing.",
     )
     parser.add_argument("--reset-state", action="store_true", help="Ignore previous state and re-index all items.")
+    parser.add_argument("--clear-collection", action="store_true", help="Delete ALL existing points in the collection before indexing.")
     parser.add_argument(
         "--tag-map-output",
         default=str(DEFAULT_TAG_MAP_OUTPUT),
@@ -686,6 +706,14 @@ def parse_args() -> argparse.Namespace:
         "--db-url",
         default=None,
         help="SQLAlchemy DB URL. Defaults to DATABASE_URL or sqlite:///./comicsearch.db.",
+    )
+    parser.add_argument(
+        "--served-origin-base",
+        default=None,
+        help="Base directory that Caddy/nginx serves origin images from. "
+             "If set, image paths relative to this base are stored as 'origin_source_path' "
+             "in Qdrant payloads for constructing origin image URLs on the frontend. "
+             "Defaults to the comics/ subdirectory under the project root.",
     )
     return parser.parse_args()
 

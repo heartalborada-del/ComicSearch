@@ -12,6 +12,8 @@ export interface MangaCandidate {
     hits: number
     top1_score: number
     top_page_no: number | null
+    /** Relative path to the origin page image (e.g. "origin/ehentai/389-f805/page_0001.jpg"). */
+    top_page_origin_path: string | null
 }
 
 /** Full search response from POST /search. */

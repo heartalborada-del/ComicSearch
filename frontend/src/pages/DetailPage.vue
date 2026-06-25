@@ -93,9 +93,9 @@ watch(
     <div v-else-if="packInfo" class="detail-content">
       <v-row>
         <!-- Cover Image -->
-        <v-col cols="12" sm="3" md="2" class="d-flex justify-center">
-          <v-card variant="tonal" class="bg-surface-container" rounded="lg" max-width="200" overflow="hidden">
-            <v-img :src="coverSrc" aspect-ratio="0.7" cover class="bg-surface-container-high">
+        <v-col cols="12" sm="4" md="3" class="d-flex justify-center justify-sm-start">
+          <v-card variant="tonal" class="bg-surface-container cover-card" rounded="lg" overflow="hidden">
+            <v-img :src="coverSrc" aspect-ratio="0.72" cover class="bg-surface-container-high" style="height: 100%;">
               <template #placeholder>
                 <div class="d-flex align-center justify-center fill-height">
                   <v-icon size="48" color="outline">mdi-book-outline</v-icon>
@@ -111,7 +111,7 @@ watch(
         </v-col>
 
         <!-- Metadata -->
-        <v-col cols="12" sm="9" md="10">
+        <v-col cols="12" sm="8" md="9">
           <div class="text-overline text-on-surface-variant mb-1">
             Pack #{{ packInfo.pack_id }}
           </div>
@@ -157,5 +157,10 @@ watch(
     opacity: 0.75;
     vertical-align: -3px;
   }
+}
+
+.cover-card {
+  width: 200px;
+  max-width: 100%;
 }
 </style>

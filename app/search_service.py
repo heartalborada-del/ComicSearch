@@ -105,6 +105,7 @@ class SearchService:
                     "hits": hits,
                     "top1_score": round(top_scores[0], 6),
                     "top_page_no": top_payload.get("page_no"),
+                    "top_page_origin_path": top_payload.get("origin_source_path"),
                 }
             )
 

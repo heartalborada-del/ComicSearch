@@ -236,8 +236,8 @@ class EhentaiIngestService:
     def _build_serve_cover(self, pack_id: int, first_page_path: Path) -> None:
         """Copy the first page as cover into image_serve_root/cover/{pack_id}.jpg.
 
-        This matches the frontend URL pattern: /images/cover/{pack_id}
-        The file on disk must be named e.g. `12345.jpg` — nginx try_files
+        This matches the frontend URL pattern: /served/cover/{pack_id}
+        The file on disk must be named e.g. `12345.jpg` — Caddy try_files
         handles the extension-less request.
         """
         serve_root = Path(self._settings.ehentai.image_serve_root).resolve()
@@ -251,6 +251,20 @@ class EhentaiIngestService:
                 logger.exception("failed to copy cover for pack_id=%s", pack_id)
             else:
                 logger.info("cover written for pack_id=%s -> %s", pack_id, dest)
+
+    def _build_origin_source_path(self, file_path: Path) -> str | None:
+        """Compute the URL path for an origin image relative to the Caddy/nginx root.
+
+        The Caddy root is the grandparent of archive_extract_root.
+        For example, if archive_extract_root is /mnt/comicsearch/upload/origin/ehentai
+        and a file is at /mnt/comicsearch/upload/origin/ehentai/389-f805/page_0001.jpg,
+        this returns "origin/ehentai/389-f805/page_0001.jpg".
+        """
+        try:
+            caddy_root = self._dataset_root().resolve().parent.parent
+            return str(file_path.resolve().relative_to(caddy_root))
+        except (ValueError, OSError):
+            return None
 
     @staticmethod
     def _select_resample_archive(archives: list[ArchiveInformation]) -> ArchiveInformation:
@@ -486,6 +500,7 @@ class EhentaiIngestService:
         category: str,
         crop_bbox: list[int] | None = None,
         crop_score: float | None = None,
+        origin_source_path: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "pack_id": int(pack_id),
@@ -502,6 +517,8 @@ class EhentaiIngestService:
             payload["crop_bbox"] = [int(value) for value in crop_bbox]
         if crop_score is not None:
             payload["crop_score"] = round(float(crop_score), 6)
+        if origin_source_path is not None:
+            payload["origin_source_path"] = origin_source_path
         return payload
 
     def _upsert_points(self, points: list[qm.PointStruct]) -> None:
@@ -639,10 +656,12 @@ class EhentaiIngestService:
         crop_points = 0
 
         async with aiohttp.ClientSession(timeout=timeout, **self._session_kwargs()) as session:
+            page_entry_paths: dict[int, Path] = {}
             page_entries: list[tuple[int, bytes]] = []
             if archive_image_paths is not None:
                 for page_no, image_path in enumerate(archive_image_paths, start=1):
                     page_entries.append((page_no, image_path.read_bytes()))
+                    page_entry_paths[page_no] = image_path
             else:
                 for page_no in sorted(page_urls):
                     page_url = page_urls[page_no]
@@ -651,6 +670,7 @@ class EhentaiIngestService:
                     output_path = Path(str(archive_dataset_dir)) / f"page_{int(page_no):04d}{output_ext}"
                     output_path.write_bytes(image_bytes)
                     page_entries.append((page_no, image_bytes))
+                    page_entry_paths[page_no] = output_path
 
         if archive_image_paths is None and archive_dataset_dir is not None:
             self._write_comic_info_xml(
@@ -664,6 +684,9 @@ class EhentaiIngestService:
             self._check_cancel(should_cancel)
             full_vector = self._embedder.embed_bytes(image_bytes)
             full_vector_list = [float(value) for value in np.asarray(full_vector, dtype=np.float32).tolist()]
+            origin_path = None
+            if page_no in page_entry_paths:
+                origin_path = self._build_origin_source_path(page_entry_paths[page_no])
             points.append(
                 self._point_struct(
                     point_id=_stable_point_id("ehentai", resolved_gid, resolved_token, page_no, "page"),
@@ -678,6 +701,7 @@ class EhentaiIngestService:
                         source_type="ehentai_page",
                         title=comic_info.title,
                         category=str(comic_info.category),
+                        origin_source_path=origin_path,
                     ),
                 )
             )
@@ -741,7 +765,7 @@ class EhentaiIngestService:
         self._upsert_points(points)
 
         # --- Copy cover image to the serve directory ---
-        # Frontend expects: {VITE_IMAGE_BASE_URL}/cover/{pack_id}
+        # Frontend expects: {IMAGE_BASE_URL}/served/cover/{pack_id}
         # The serve-root is typically synced/sftp'd to a static file server.
         try:
             if archive_image_paths is not None:

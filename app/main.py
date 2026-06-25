@@ -347,6 +347,7 @@ def create_app(
 
     @api_router.post("/search")
     async def search(
+        request: Request,
         image: UploadFile = File(...),
         keyword_ids: str | None = Form(default=None),
         robust_partial: bool | None = Form(default=None),
