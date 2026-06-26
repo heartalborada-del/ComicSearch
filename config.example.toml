@@ -22,7 +22,17 @@ port = 6333
 collection = "pages"
 
 [database]
+# SQLite: 适合开发与中小规模部署。已启用 WAL 模式 + busy_timeout，
+# 支持多读并发 + 单写串行，连接池 20+40。写密集高并发场景请用 PostgreSQL/MySQL。
+# Suitable for dev / small-to-medium deployments. WAL mode + busy_timeout enabled,
+# allowing concurrent reads with serialized writes (pool 20+40).
 url = "sqlite:///./comicsearch.db"
+
+# PostgreSQL (推荐高并发 / 生产环境):
+#   url = "postgresql+psycopg://user:pass@localhost:5432/comicsearch"
+# MySQL:
+#   url = "mysql+pymysql://user:pass@localhost:3306/comicsearch"
+# 非 SQLite 数据库连接池: pool_size=20, max_overflow=40, pool_pre_ping=ON
 
 [auth]
 enabled = false
@@ -50,7 +60,13 @@ face_crop_confidence_threshold = 0.35
 face_crop_expand_ratio = 0.15
 face_crop_min_size = 48
 face_crop_max_detections_per_image = 6
-download_timeout_seconds = 60
+download_timeout_seconds = 600
+# 存档下载重试次数与速率限制基础等待时间（秒）。
+# hath.network 429 时，每次重试等待至少 archive_rate_limit_base_wait 秒。
+archive_download_retries = 10
+archive_rate_limit_base_wait = 120.0
+# 并发存档下载数。hath.network 限流严格，建议设为 1。
+archive_download_concurrency = 1
 # require_review = true            # 开启导入审核，非管理员提交需管理员审批
 # image_serve_root = "comics/served"  # 封面图的 serve 目录
 

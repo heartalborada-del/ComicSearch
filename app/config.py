@@ -52,7 +52,10 @@ class EhentaiSettings:
     face_crop_expand_ratio: float = 0.15
     face_crop_min_size: int = 48
     face_crop_max_detections_per_image: int = 6
-    download_timeout_seconds: float = 60.0
+    download_timeout_seconds: float = 600.0
+    archive_download_retries: int = 10
+    archive_rate_limit_base_wait: float = 120.0
+    archive_download_concurrency: int = 1
     archive_extract_root: str = "comics/origin/ehentai"
     image_serve_root: str = "comics/served"
     allow_archive_fallback: bool = False
@@ -279,9 +282,26 @@ def load_settings(config_path: str | os.PathLike[str] | None = None) -> AppSetti
             min_value=1,
         ),
         download_timeout_seconds=_coerce_float(
-            ehentai_section.get("download_timeout_seconds", 60.0),
+            ehentai_section.get("download_timeout_seconds", 600.0),
             field_name="ehentai.download_timeout_seconds",
             min_value=1.0,
+        ),
+        archive_download_retries=_coerce_int(
+            ehentai_section.get("archive_download_retries", 10),
+            field_name="ehentai.archive_download_retries",
+            min_value=1,
+            max_value=100,
+        ),
+        archive_rate_limit_base_wait=_coerce_float(
+            ehentai_section.get("archive_rate_limit_base_wait", 120.0),
+            field_name="ehentai.archive_rate_limit_base_wait",
+            min_value=1.0,
+        ),
+        archive_download_concurrency=_coerce_int(
+            ehentai_section.get("archive_download_concurrency", 1),
+            field_name="ehentai.archive_download_concurrency",
+            min_value=1,
+            max_value=20,
         ),
         archive_extract_root=_resolve_relative_path(
             _coerce_str(

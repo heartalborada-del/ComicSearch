@@ -10,6 +10,14 @@ import type { QuotaResponse, UserInfo } from '@/types/auth'
 
 const TOKEN_KEY = 'comicsearch-token'
 
+// ── Auth init synchronisation ──
+// Resolved when checkAuthStatus() completes so the router guard can
+// wait for auth state to be known before making routing decisions.
+let _authReadyResolve: (() => void) | null = null
+const _authReadyPromise = new Promise<void>((resolve) => {
+    _authReadyResolve = resolve
+})
+
 export const useAuthStore = defineStore('auth', () => {
     const authEnabled = ref(false)
     const turnstileSiteKey = ref<string | null>(null)
@@ -73,6 +81,12 @@ export const useAuthStore = defineStore('auth', () => {
             if (status.logged_in && status.user) {
                 loggedIn.value = true
                 user.value = status.user
+                // Restore token from localStorage on refresh — the server
+                // confirmed the stored token is valid but doesn't return it.
+                const stored = localStorage.getItem(TOKEN_KEY)
+                if (stored) {
+                    token.value = stored
+                }
             } else {
                 // Try to restore from localStorage if server says not logged in
                 // (e.g. token expired on server side)
@@ -96,7 +110,19 @@ export const useAuthStore = defineStore('auth', () => {
             authEnabled.value = false
         } finally {
             loading.value = false
+            // Signal that the initial auth check is complete
+            if (_authReadyResolve) {
+                _authReadyResolve()
+            }
         }
+    }
+
+    /**
+     * Wait for the initial auth check to complete.
+     * Used by the router guard to avoid deciding before auth state is known.
+     */
+    async function waitForAuthReady(): Promise<void> {
+        await _authReadyPromise
     }
 
     /**
@@ -227,5 +253,6 @@ export const useAuthStore = defineStore('auth', () => {
         logout,
         tryRestoreAuth,
         clearAuth,
+        waitForAuthReady,
     }
 })

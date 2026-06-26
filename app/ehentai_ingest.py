@@ -68,9 +68,42 @@ def _load_yolo_detector(model_path: str) -> YOLO:
     return YOLO(str(resolved))
 
 
-async def _fetch_bytes(session: aiohttp.ClientSession, url: str, retries: int = 3) -> bytes:
-    delay_seconds = 1.0
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parse a Retry-After header value into seconds.
+
+    Supports both delta-seconds (e.g. "30") and HTTP-date format.
+    Returns None if the value is absent or unparseable.
+    """
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    # Delta-seconds form
+    try:
+        seconds = int(value)
+        return max(0.0, float(seconds))
+    except ValueError:
+        pass
+    # HTTP-date form
+    try:
+        from email.utils import parsedate_to_datetime
+
+        dt = parsedate_to_datetime(value)
+        if dt is not None:
+            from datetime import datetime, timezone
+
+            now = datetime.now(timezone.utc)
+            delta = (dt - now).total_seconds()
+            return max(0.0, delta)
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+async def _fetch_bytes(session: aiohttp.ClientSession, url: str, retries: int = 5) -> bytes:
     last_error: Exception | None = None
+    delay_seconds = 1.0
 
     for attempt in range(retries):
         try:
@@ -81,11 +114,15 @@ async def _fetch_bytes(session: aiohttp.ClientSession, url: str, retries: int = 
                         raise RuntimeError(f"empty response body for {url}")
                     return body
 
-                if response.status in {429} or response.status >= 500:
+                if response.status == 429 or response.status >= 500:
+                    # Honor Retry-After header when present, otherwise back off.
+                    retry_after = _parse_retry_after(response.headers.get("Retry-After"))
                     await response.release()
                     if attempt < retries - 1:
-                        await asyncio.sleep(delay_seconds)
-                        delay_seconds *= 2
+                        wait = retry_after if retry_after is not None else delay_seconds
+                        logger.warning("fetch %s got status=%s, retry %d/%d after %.1fs", url, response.status, attempt + 1, retries, wait)
+                        await asyncio.sleep(wait)
+                        delay_seconds = min(delay_seconds * 2, 60.0)
                         continue
 
                 raise RuntimeError(f"failed to download {url}: status={response.status}")
@@ -94,7 +131,7 @@ async def _fetch_bytes(session: aiohttp.ClientSession, url: str, retries: int = 
             if attempt >= retries - 1:
                 break
             await asyncio.sleep(delay_seconds)
-            delay_seconds *= 2
+            delay_seconds = min(delay_seconds * 2, 60.0)
 
     if last_error is not None:
         raise last_error
@@ -170,6 +207,20 @@ class EhentaiIngestService:
         self._settings = settings
         self._embedder = embedder
         self._search_service = search_service
+
+    def _get_archive_semaphore(self) -> asyncio.Semaphore:
+        """Return an asyncio.Semaphore bound to the currently running event loop.
+
+        Semaphores created in one event loop cannot be used in another,
+        so we create one lazily per event loop and cache it.
+        """
+        loop = asyncio.get_running_loop()
+        cache: dict[int, asyncio.Semaphore] = getattr(self, "_semaphore_cache", {})
+        loop_key = id(loop)
+        if loop_key not in cache:
+            cache[loop_key] = asyncio.Semaphore(self._settings.ehentai.archive_download_concurrency)
+            object.__setattr__(self, "_semaphore_cache", cache)
+        return cache[loop_key]
 
     def _gallery_source(self, gid: int, token: str) -> str:
         base_url = "https://exhentai.org" if self._settings.ehentai.is_exhentai else "https://e-hentai.org"
@@ -321,9 +372,10 @@ class EhentaiIngestService:
         session: aiohttp.ClientSession,
         url: str,
         output_path: Path,
-        retries: int = 3,
+        retries: int = 10,
+        rate_limit_base_wait: float = 120.0,
     ) -> None:
-        delay_seconds = 1.0
+        delay_seconds = 2.0
         last_error: Exception | None = None
         for attempt in range(retries):
             try:
@@ -337,11 +389,22 @@ class EhentaiIngestService:
                         if output_path.stat().st_size <= 0:
                             raise RuntimeError("downloaded archive is empty")
                         return
-                    if response.status in {429} or response.status >= 500:
+                    if response.status == 429 or response.status >= 500:
+                        # Honor Retry-After header (hath.network sends it on 429).
+                        retry_after = _parse_retry_after(response.headers.get("Retry-After"))
                         await response.release()
                         if attempt < retries - 1:
-                            await asyncio.sleep(delay_seconds)
-                            delay_seconds *= 2
+                            # 429 uses a longer base backoff than 5xx.
+                            if response.status == 429:
+                                wait = retry_after if retry_after is not None else max(delay_seconds, rate_limit_base_wait)
+                            else:
+                                wait = retry_after if retry_after is not None else delay_seconds
+                            logger.warning(
+                                "archive download %s got status=%s, retry %d/%d after %.1fs",
+                                url, response.status, attempt + 1, retries, wait,
+                            )
+                            await asyncio.sleep(wait)
+                            delay_seconds = min(delay_seconds * 2, 600.0)
                             continue
                     raise RuntimeError(f"failed to download archive {url}: status={response.status}")
             except Exception as exc:
@@ -349,7 +412,7 @@ class EhentaiIngestService:
                 if attempt >= retries - 1:
                     break
                 await asyncio.sleep(delay_seconds)
-                delay_seconds *= 2
+                delay_seconds = min(delay_seconds * 2, 600.0)
         if last_error is not None:
             raise last_error
         raise RuntimeError(f"failed to download archive {url}")
@@ -384,7 +447,14 @@ class EhentaiIngestService:
             timeout = aiohttp.ClientTimeout(total=float(self._settings.ehentai.download_timeout_seconds))
             async with aiohttp.ClientSession(timeout=timeout, **self._session_kwargs()) as session:
                 try:
-                    await self._download_archive_file(session=session, url=download_url, output_path=archive_path)
+                    async with self._get_archive_semaphore():
+                        await self._download_archive_file(
+                            session=session,
+                            url=download_url,
+                            output_path=archive_path,
+                            retries=self._settings.ehentai.archive_download_retries,
+                            rate_limit_base_wait=self._settings.ehentai.archive_rate_limit_base_wait,
+                        )
                 except Exception as exc:
                     raise RuntimeError(f"archive step=downloadArchive failed url={download_url}: {exc}") from exc
 

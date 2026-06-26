@@ -62,13 +62,16 @@ const router = createRouter({
 // Global auth guard: redirect to login if route requires auth and
 // the user is not logged in while auth is enabled.
 router.beforeEach(async (to, _from, next) => {
-    // We need to access the auth store. It's initialized in main.ts,
-    // so just call useAuthStore().
     const authStore = useAuthStore()
 
     // If auth hasn't been checked yet, check it now
     if (!authStore.authEnabled && !authStore.loading) {
         await authStore.checkAuthStatus()
+    }
+
+    // If auth check is still in progress, wait for it to complete
+    if (authStore.loading) {
+        await authStore.waitForAuthReady()
     }
 
     // If the route doesn't require auth, allow

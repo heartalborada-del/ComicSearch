@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Lock, Thread
 from typing import Any, Awaitable, Callable, cast
 from uuid import uuid4
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models import Base, ImportTask
@@ -43,6 +45,7 @@ class SubmitResult:
 class TaskManager:
     def __init__(self, session_factory: Callable[[], Any], engine: Any) -> None:
         self._session_factory = session_factory
+        self._engine = engine
         self._handlers: dict[str, TaskHandler] = {}
         self._running_task_ids: set[str] = set()
         self._lock = Lock()
@@ -205,10 +208,27 @@ class TaskManager:
                 db.commit()
             return
 
+        _cancel_cache: dict[str, Any] = {}
+
         def _should_cancel() -> bool:
-            with self._session_factory() as cancel_db:
-                cancel_row = cancel_db.get(ImportTask, task_id)
-                return cancel_row is None or int(cancel_row.cancel_requested or 0) == 1
+            # Throttle cancel checks: this callback is invoked per-page and
+            # per-face-crop during long imports. Hitting the DB every call can
+            # exhaust the connection pool. Cache the result for 1 second.
+            now = time.monotonic()
+            cached = _cancel_cache.get("ts")
+            if cached is not None and now - cached < 1.0:
+                return _cancel_cache.get("value", False)
+            # Use a raw engine connection instead of a full ORM session to
+            # avoid the overhead and pool pressure of session creation.
+            with self._engine.connect() as conn:
+                row = conn.execute(
+                    text("SELECT cancel_requested FROM import_task WHERE task_id = :tid"),
+                    {"tid": task_id},
+                ).first()
+            cancelled = row is None or int(row[0] or 0) == 1
+            _cancel_cache["ts"] = now
+            _cancel_cache["value"] = cancelled
+            return cancelled
 
         try:
             with self._session_factory() as work_db:

@@ -258,8 +258,43 @@ def create_app(
 
         runtime.task_manager.register_handler("ehentai_import", _ehentai_import_handler)
 
+    def _install_asyncio_noise_filter() -> None:
+        """Suppress benign ConnectionResetError noise on Windows ProactorEventLoop.
+
+        Hath.network / e-hentai CDN nodes often reset the TCP connection (RST)
+        immediately after sending the full response body. When asyncio's
+        ProactorBasePipeTransport tears down the socket afterwards, calling
+        ``socket.shutdown(SHUT_RDWR)`` on an already-reset socket raises
+        ``ConnectionResetError [WinError 10054]``. This happens *after* the
+        response has been fully consumed, so it does not affect any business
+        logic and cannot be caught by the request-level try/except. We filter
+        it out at the loop level to keep logs clean.
+        """
+        import asyncio
+        import sys
+
+        loop = asyncio.get_event_loop()
+
+        def _exception_handler(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+            exc: Any = context.get("exception")
+            if isinstance(exc, ConnectionResetError):
+                message = str(exc)
+                # WinError 10054 = 远程主机强迫关闭了一个现有的连接
+                if "10054" in message or "forcibly closed" in message.lower():
+                    logger.debug(
+                        "ignored benign ConnectionResetError from asyncio: %s (transport=%s)",
+                        message,
+                        context.get("transport"),
+                    )
+                    return
+            # Fall through to the default handler for everything else.
+            loop.default_exception_handler(context)
+
+        loop.set_exception_handler(_exception_handler)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        _install_asyncio_noise_filter()
         if runtime.embedder is None:
             runtime.embedder = OnnxImageEmbedder(
                 onnx_path=runtime.settings.embedder.onnx_path,

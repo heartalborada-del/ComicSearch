@@ -4,9 +4,10 @@ import logging
 from contextlib import contextmanager
 from threading import RLock
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import QueuePool
 
 from app.config import load_settings
 from app.models import Base
@@ -18,6 +19,28 @@ SessionLocal = sessionmaker(autoflush=False, autocommit=False, expire_on_commit=
 DATABASE_URL = None
 
 
+def _apply_sqlite_pragmas(dbapi_connection: object, connection_record: object) -> None:
+    """Apply performance/concurrency PRAGMAs to every new SQLite connection.
+
+    - WAL mode: allows concurrent readers while a writer holds the lock,
+      dramatically improving read throughput under write load.
+    - busy_timeout: writers wait up to N ms for the lock instead of failing
+      immediately with "database is locked".
+    - journal_mode=WAL + synchronous=NORMAL: durable enough for most workloads
+      while cutting fsync cost on every commit.
+    - foreign_keys: enforce referential integrity.
+    """
+    cursor = dbapi_connection.cursor()  # type: ignore[union-attr]
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=10000")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA cache_size=-65536")  # 64MB page cache
+    finally:
+        cursor.close()  # type: ignore[union-attr]
+
+
 def configure_database(database_url: str | None = None) -> None:
     global DATABASE_URL, SessionLocal, _engine
 
@@ -27,8 +50,35 @@ def configure_database(database_url: str | None = None) -> None:
             return
 
         DATABASE_URL = resolved_database_url
-        engine_kwargs = {"connect_args": {"check_same_thread": False}} if DATABASE_URL.startswith("sqlite") else {}
+        is_sqlite = DATABASE_URL.startswith("sqlite")
+        if is_sqlite:
+            # SQLite with WAL mode: multiple readers can proceed concurrently
+            # with a single writer. We use a QueuePool so read-heavy API
+            # requests don't queue behind one connection, while busy_timeout
+            # lets writers wait for the lock instead of erroring out.
+            #
+            # NOTE: SQLite still serializes writes. For write-heavy workloads
+            # at scale, switch to PostgreSQL/MySQL (see config.toml [database]).
+            engine_kwargs = {
+                "connect_args": {"check_same_thread": False, "timeout": 30},
+                "poolclass": QueuePool,
+                "pool_size": 20,
+                "max_overflow": 40,
+                "pool_timeout": 30,
+                "pool_pre_ping": True,
+            }
+        else:
+            # Larger pool to absorb long-running task worker sessions plus
+            # concurrent API requests. pre_ping avoids stale connections.
+            engine_kwargs = {
+                "pool_size": 20,
+                "max_overflow": 40,
+                "pool_timeout": 30,
+                "pool_pre_ping": True,
+            }
         _engine = create_engine(DATABASE_URL, **engine_kwargs)
+        if is_sqlite:
+            event.listen(_engine, "connect", _apply_sqlite_pragmas)
         SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False, expire_on_commit=False, class_=Session)
 
 
