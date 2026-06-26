@@ -56,6 +56,7 @@ class EhentaiSettings:
     archive_download_retries: int = 10
     archive_rate_limit_base_wait: float = 120.0
     archive_download_concurrency: int = 1
+    max_concurrent_imports: int = 2
     archive_extract_root: str = "comics/origin/ehentai"
     image_serve_root: str = "comics/served"
     allow_archive_fallback: bool = False
@@ -300,6 +301,12 @@ def load_settings(config_path: str | os.PathLike[str] | None = None) -> AppSetti
         archive_download_concurrency=_coerce_int(
             ehentai_section.get("archive_download_concurrency", 1),
             field_name="ehentai.archive_download_concurrency",
+            min_value=1,
+            max_value=20,
+        ),
+        max_concurrent_imports=_coerce_int(
+            ehentai_section.get("max_concurrent_imports", 2),
+            field_name="ehentai.max_concurrent_imports",
             min_value=1,
             max_value=20,
         ),

@@ -7,7 +7,7 @@ from threading import RLock
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import QueuePool
+from sqlalchemy.pool import NullPool, QueuePool
 
 from app.config import load_settings
 from app.models import Base
@@ -52,25 +52,22 @@ def configure_database(database_url: str | None = None) -> None:
         DATABASE_URL = resolved_database_url
         is_sqlite = DATABASE_URL.startswith("sqlite")
         if is_sqlite:
-            # SQLite with WAL mode: multiple readers can proceed concurrently
-            # with a single writer. We use a QueuePool so read-heavy API
-            # requests don't queue behind one connection, while busy_timeout
-            # lets writers wait for the lock instead of erroring out.
+            # SQLite: use NullPool (no connection pooling). Each session opens
+            # its own connection and closes it when done — pool exhaustion is
+            # physically impossible. SQLite connections are cheap (local file
+            # open), and WAL mode + busy_timeout handle concurrency.
             #
-            # NOTE: SQLite still serializes writes. For write-heavy workloads
-            # at scale, switch to PostgreSQL/MySQL (see config.toml [database]).
+            # QueuePool is the wrong choice for SQLite here because import
+            # tasks hold sessions for minutes (download + embedding), which
+            # starves the pool even at 20+40 connections.
             engine_kwargs = {
                 "connect_args": {"check_same_thread": False, "timeout": 30},
-                "poolclass": QueuePool,
-                "pool_size": 20,
-                "max_overflow": 40,
-                "pool_timeout": 30,
-                "pool_pre_ping": True,
+                "poolclass": NullPool,
             }
         else:
-            # Larger pool to absorb long-running task worker sessions plus
-            # concurrent API requests. pre_ping avoids stale connections.
+            # PostgreSQL/MySQL: connection pooling with pre_ping.
             engine_kwargs = {
+                "poolclass": QueuePool,
                 "pool_size": 20,
                 "max_overflow": 40,
                 "pool_timeout": 30,

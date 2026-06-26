@@ -67,6 +67,11 @@ archive_download_retries = 10
 archive_rate_limit_base_wait = 120.0
 # 并发存档下载数。hath.network 限流严格，建议设为 1。
 archive_download_concurrency = 1
+# 同时运行的 ehentai 导入任务上限。超过此数量后新提交的任务排队等待。
+# SQLite 写操作串行化，建议设为 1~2；PostgreSQL/MySQL 可适当调高。
+# Maximum concurrent ehentai import tasks. Excess tasks queue as pending.
+# SQLite serialises writes — keep at 1~2. Raise for PostgreSQL/MySQL.
+max_concurrent_imports = 2
 # require_review = true            # 开启导入审核，非管理员提交需管理员审批
 # image_serve_root = "comics/served"  # 封面图的 serve 目录
 

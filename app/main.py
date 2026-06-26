@@ -262,6 +262,9 @@ def create_app(
             )
 
         runtime.task_manager.register_handler("ehentai_import", _ehentai_import_handler)
+        runtime.task_manager.set_max_concurrent(
+            "ehentai_import", runtime.settings.ehentai.max_concurrent_imports
+        )
 
     def _install_asyncio_noise_filter() -> None:
         """Suppress benign ConnectionResetError noise on Windows ProactorEventLoop.

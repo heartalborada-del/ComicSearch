@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 from PIL import Image
 from qdrant_client.http import models as qm
-from sqlalchemy import insert, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from ultralytics import YOLO
 
@@ -208,20 +208,6 @@ class EhentaiIngestService:
         self._embedder = embedder
         self._search_service = search_service
 
-    def _get_archive_semaphore(self) -> asyncio.Semaphore:
-        """Return an asyncio.Semaphore bound to the currently running event loop.
-
-        Semaphores created in one event loop cannot be used in another,
-        so we create one lazily per event loop and cache it.
-        """
-        loop = asyncio.get_running_loop()
-        cache: dict[int, asyncio.Semaphore] = getattr(self, "_semaphore_cache", {})
-        loop_key = id(loop)
-        if loop_key not in cache:
-            cache[loop_key] = asyncio.Semaphore(self._settings.ehentai.archive_download_concurrency)
-            object.__setattr__(self, "_semaphore_cache", cache)
-        return cache[loop_key]
-
     def _gallery_source(self, gid: int, token: str) -> str:
         base_url = "https://exhentai.org" if self._settings.ehentai.is_exhentai else "https://e-hentai.org"
         return f"{base_url}/g/{int(gid)}/{str(token)}/"
@@ -251,6 +237,31 @@ class EhentaiIngestService:
         if self._settings.ehentai.cookies:
             kwargs["cookies"] = self._settings.ehentai.cookies
         return kwargs
+
+    def commit_with_retry(self, db: Session, max_attempts: int = 5) -> None:
+        """Commit the current transaction, retrying on SQLite write contention.
+
+        SQLite serializes all writes; when multiple import tasks run
+        concurrently, ``db.commit()`` can fail with ``OperationalError``
+        ("database is locked").  This wrapper retries with a short backoff
+        so the application layer doesn't need to deal with transient locks.
+        """
+        import time as _time
+        from sqlalchemy import exc as sa_exc
+
+        delay = 0.1
+        for attempt in range(max_attempts):
+            try:
+                db.commit()
+                return
+            except sa_exc.OperationalError:
+                if attempt >= max_attempts - 1:
+                    raise
+                _time.sleep(delay)
+                delay = min(delay * 2, 2.0)
+            except Exception:
+                db.rollback()
+                raise
 
     @staticmethod
     def _check_cancel(should_cancel: Any) -> None:
@@ -372,10 +383,10 @@ class EhentaiIngestService:
         session: aiohttp.ClientSession,
         url: str,
         output_path: Path,
-        retries: int = 10,
-        rate_limit_base_wait: float = 120.0,
     ) -> None:
-        delay_seconds = 2.0
+        retries = int(self._settings.ehentai.archive_download_retries)
+        rate_limit_wait = float(self._settings.ehentai.archive_rate_limit_base_wait)
+        delay_seconds = max(rate_limit_wait / 4, 2.0)
         last_error: Exception | None = None
         for attempt in range(retries):
             try:
@@ -394,9 +405,9 @@ class EhentaiIngestService:
                         retry_after = _parse_retry_after(response.headers.get("Retry-After"))
                         await response.release()
                         if attempt < retries - 1:
-                            # 429 uses a longer base backoff than 5xx.
+                            # 429 uses the configured base wait; 5xx uses normal backoff.
                             if response.status == 429:
-                                wait = retry_after if retry_after is not None else max(delay_seconds, rate_limit_base_wait)
+                                wait = retry_after if retry_after is not None else rate_limit_wait
                             else:
                                 wait = retry_after if retry_after is not None else delay_seconds
                             logger.warning(
@@ -404,7 +415,7 @@ class EhentaiIngestService:
                                 url, response.status, attempt + 1, retries, wait,
                             )
                             await asyncio.sleep(wait)
-                            delay_seconds = min(delay_seconds * 2, 600.0)
+                            delay_seconds = min(delay_seconds * 2, rate_limit_wait * 2)
                             continue
                     raise RuntimeError(f"failed to download archive {url}: status={response.status}")
             except Exception as exc:
@@ -412,7 +423,7 @@ class EhentaiIngestService:
                 if attempt >= retries - 1:
                     break
                 await asyncio.sleep(delay_seconds)
-                delay_seconds = min(delay_seconds * 2, 600.0)
+                delay_seconds = min(delay_seconds * 2, rate_limit_wait * 2)
         if last_error is not None:
             raise last_error
         raise RuntimeError(f"failed to download archive {url}")
@@ -447,14 +458,7 @@ class EhentaiIngestService:
             timeout = aiohttp.ClientTimeout(total=float(self._settings.ehentai.download_timeout_seconds))
             async with aiohttp.ClientSession(timeout=timeout, **self._session_kwargs()) as session:
                 try:
-                    async with self._get_archive_semaphore():
-                        await self._download_archive_file(
-                            session=session,
-                            url=download_url,
-                            output_path=archive_path,
-                            retries=self._settings.ehentai.archive_download_retries,
-                            rate_limit_base_wait=self._settings.ehentai.archive_rate_limit_base_wait,
-                        )
+                    await self._download_archive_file(session=session, url=download_url, output_path=archive_path)
                 except Exception as exc:
                     raise RuntimeError(f"archive step=downloadArchive failed url={download_url}: {exc}") from exc
 
@@ -488,14 +492,8 @@ class EhentaiIngestService:
 
         for keyword_id, keyword_name in session.execute(select(Keyword.id, Keyword.name)).all():
             normalized_name = normalize_tag(keyword_name)
-            kw_id = int(keyword_id)
-            # TagIdMap is the authoritative source for tag↔id mapping. If
-            # TagIdMap already knows this keyword_id, don't overwrite it —
-            # Keyword.name may be stale. We still setdefault so the Keyword
-            # name can serve as an alias.
-            if kw_id not in id_to_tag:
-                id_to_tag[kw_id] = normalized_name
-            tag_to_id.setdefault(normalized_name, kw_id)
+            id_to_tag[int(keyword_id)] = normalized_name
+            tag_to_id.setdefault(normalized_name, int(keyword_id))
 
         next_keyword_id = (max(id_to_tag.keys()) + 1) if id_to_tag else 1
         for raw_tag in tags:
@@ -509,67 +507,21 @@ class EhentaiIngestService:
             next_keyword_id += 1
 
         for keyword_id, keyword_name in sorted(id_to_tag.items()):
-            kw_id = int(keyword_id)
-            # Keyword: INSERT OR IGNORE avoids UNIQUE conflict on id when
-            # a concurrent request already inserted the same row.
-            stmt = insert(Keyword).values(id=kw_id, name=keyword_name).prefix_with("OR IGNORE")
-            session.execute(stmt)
-            # Correct the name if the row already existed under a stale name.
-            keyword = session.get(Keyword, kw_id)
-            if keyword.name != keyword_name:
+            keyword = session.get(Keyword, int(keyword_id))
+            if keyword is None:
+                session.add(Keyword(id=int(keyword_id), name=keyword_name))
+            elif keyword.name != keyword_name:
                 keyword.name = keyword_name
 
-            # TagIdMap: INSERT OR IGNORE across *all* conflicts (tag PK and
-            # keyword_id UNIQUE).  This is concurrency-safe: if another
-            # request already claimed this keyword_id with a different tag,
-            # our insert is silently dropped and we reconcile below.
             tag_row = session.get(TagIdMap, keyword_name)
             if tag_row is None:
-                stmt = (
-                    insert(TagIdMap)
-                    .values(tag=keyword_name, keyword_id=kw_id)
-                    .prefix_with("OR IGNORE")
-                )
-                session.execute(stmt)
+                session.add(TagIdMap(tag=keyword_name, keyword_id=int(keyword_id)))
             else:
                 current_keyword_id = int(cast(int, getattr(tag_row, "keyword_id")))
-                if current_keyword_id != kw_id:
-                    tag_row.keyword_id = kw_id
+                if current_keyword_id != int(keyword_id):
+                    tag_row.keyword_id = int(keyword_id)
 
         session.flush()
-
-        # Reconcile: any tag whose INSERT was silently ignored (keyword_id
-        # stolen by a concurrent insert) needs a fresh keyword_id.
-        missing = [t for t in tag_to_id if session.get(TagIdMap, t) is None]
-        if missing:
-            # Re-read DB to get the true max keyword_id after concurrent writes.
-            existing_ids = {
-                int(kid) for kid, in session.execute(select(TagIdMap.keyword_id)).all()
-            }
-            existing_ids.update(
-                int(kid) for kid, in session.execute(select(Keyword.id)).all()
-            )
-            next_id = (max(existing_ids) + 1) if existing_ids else 1
-
-            for tag_name in missing:
-                while next_id in existing_ids:
-                    next_id += 1
-                existing_ids.add(next_id)
-                # Use INSERT OR IGNORE here too for the same concurrency safety.
-                session.execute(
-                    insert(Keyword)
-                    .values(id=next_id, name=tag_name)
-                    .prefix_with("OR IGNORE")
-                )
-                session.execute(
-                    insert(TagIdMap)
-                    .values(tag=tag_name, keyword_id=next_id)
-                    .prefix_with("OR IGNORE")
-                )
-                tag_to_id[tag_name] = next_id
-                next_id += 1
-
-            session.flush()
         return tag_to_id
 
     @staticmethod
@@ -696,7 +648,7 @@ class EhentaiIngestService:
         if gallerykey_changed:
             self._delete_gallery_points(resolved_gid)
             self._cleanup_gid_datasets(resolved_gid, keep_token=resolved_token)
-            db.commit()
+            self.commit_with_retry(db)
 
         archive_attempted = False
         archive_used = False
@@ -766,7 +718,13 @@ class EhentaiIngestService:
             ),
             existing_gallery=existing_gallery,
         )
-        db.commit()
+        self.commit_with_retry(db)
+
+        # --- Release the DB connection during the long download/embed phase ---
+        # The session is not needed again until the task finishes. Closing it
+        # here returns the connection immediately instead of holding it idle
+        # for minutes during archive download and image embedding.
+        db.close()
 
         detector = None
         if crop_faces and self._settings.ehentai.face_crop_model:
@@ -875,7 +833,6 @@ class EhentaiIngestService:
                             category=str(comic_info.category),
                             crop_bbox=[x1, y1, x2, y2],
                             crop_score=float(detection.score),
-                            origin_source_path=origin_path,
                         ),
                     )
                 )
