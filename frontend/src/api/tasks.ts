@@ -5,6 +5,7 @@
 import { getJson, postJson } from './client'
 import type {
     ListTasksParams,
+    PaginatedTasks,
     SubmitImportRequest,
     SubmitImportResponse,
     TaskRecord,
@@ -29,20 +30,23 @@ export function getTask(taskId: string): Promise<TaskRecord> {
 }
 
 /**
- * List tasks with optional filtering.
- * @param params - Optional limit and status filter
- * @returns Array of task records
+ * List tasks with optional filtering and pagination.
+ * @param params - Optional limit, offset, and status filter
+ * @returns Paginated tasks response with items and total count
  */
-export function listTasks(params?: ListTasksParams): Promise<TaskRecord[]> {
+export function listTasks(params?: ListTasksParams): Promise<PaginatedTasks> {
     const searchParams = new URLSearchParams()
     if (params?.limit !== undefined) {
         searchParams.set('limit', String(params.limit))
+    }
+    if (params?.offset !== undefined) {
+        searchParams.set('offset', String(params.offset))
     }
     if (params?.status) {
         searchParams.set('status', params.status)
     }
     const query = searchParams.toString()
-    return getJson<TaskRecord[]>(`/tasks${query ? `?${query}` : ''}`)
+    return getJson<PaginatedTasks>(`/tasks${query ? `?${query}` : ''}`)
 }
 
 /**
@@ -57,8 +61,8 @@ export function cancelTask(taskId: string): Promise<TaskRecord> {
 /**
  * Admin: list tasks pending review.
  */
-export function listReviewTasks(): Promise<TaskRecord[]> {
-    return getJson<TaskRecord[]>('/tasks/review')
+export function listReviewTasks(): Promise<PaginatedTasks> {
+    return getJson<PaginatedTasks>('/tasks/review')
 }
 
 /**

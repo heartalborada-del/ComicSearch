@@ -44,6 +44,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '标签搜索', requiresAuth: true },
     },
     {
+        path: '/stats',
+        name: 'stats',
+        component: () => import('@/pages/DashboardPage.vue'),
+        meta: { title: '数据总览', requiresAuth: false },
+    },
+    {
         path: '/login',
         name: 'login',
         component: () => import('@/pages/LoginPage.vue'),

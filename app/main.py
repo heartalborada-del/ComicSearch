@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, HttpUrl
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import AppSettings, load_settings
@@ -124,6 +124,11 @@ class TaskStatusResponse(BaseModel):
     result: dict[str, Any] | None = None
     error: str | None = None
     payload: dict[str, Any] | None = None
+
+
+class PaginatedTaskResponse(BaseModel):
+    items: list[TaskStatusResponse]
+    total: int
 
 
 # ---- Auth Pydantic models ----
@@ -524,17 +529,22 @@ def create_app(
             items=items,
         )
 
-    @api_router.get("/tasks/review", response_model=list[TaskStatusResponse])
+    @api_router.get("/tasks/review", response_model=PaginatedTaskResponse)
     async def list_review_tasks(
-        limit: int = Query(default=50, ge=1, le=500),
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
         auth_user: User = Depends(require_admin),
-    ) -> list[TaskStatusResponse]:
+    ) -> dict[str, Any]:
         """Admin: list tasks pending review."""
         manager = app.state.runtime.task_manager
         if manager is None:
             raise HTTPException(status_code=503, detail="task manager is not available")
-        records = manager.list_tasks(limit=int(limit), status_filter="pending_review")
-        return [_task_record_response(record) for record in records]
+        records = manager.list_tasks(limit=int(limit), offset=int(offset), status_filter="pending_review")
+        total = manager.count_tasks(status_filter="pending_review")
+        return {
+            "items": [_task_record_response(record) for record in records],
+            "total": total,
+        }
 
     @api_router.post("/tasks/{task_id}/approve", response_model=TaskStatusResponse)
     async def approve_task(
@@ -588,20 +598,21 @@ def create_app(
 
         return _task_record_response(record)
 
-    @api_router.get("/tasks", response_model=list[TaskStatusResponse])
+    @api_router.get("/tasks", response_model=PaginatedTaskResponse)
     async def list_tasks(
-        limit: int = Query(default=50, ge=1, le=500),
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
         status_value: str | None = Query(default=None, alias="status"),
         auth_user: User = Depends(require_auth),
         db: Session = Depends(get_db),
-    ) -> list[TaskStatusResponse]:
+    ) -> dict[str, Any]:
         manager = app.state.runtime.task_manager
         if manager is None:
             raise HTTPException(status_code=503, detail="task manager is not available")
 
-        records = manager.list_tasks(limit=int(limit), status_filter=status_value)
+        records = manager.list_tasks(limit=int(limit), offset=int(offset), status_filter=status_value)
 
-        # Non-admins: only show their own tasks
+        # Non-admins: only show their own tasks & compute filtered total
         if not auth_user.is_admin:
             task_rows = db.execute(
                 select(ImportTask.task_id, ImportTask.user_id)
@@ -613,7 +624,19 @@ def create_app(
             }
             records = [r for r in records if r.task_id in user_task_ids]
 
-        return [_task_record_response(record) for record in records]
+            total_query = select(func.count(ImportTask.task_id)).where(
+                (ImportTask.user_id.is_(None)) | (ImportTask.user_id == auth_user.id)
+            )
+            if status_value is not None:
+                total_query = total_query.where(ImportTask.status == status_value)
+            total = int(db.scalar(total_query) or 0)
+        else:
+            total = manager.count_tasks(status_filter=status_value)
+
+        return {
+            "items": [_task_record_response(record) for record in records],
+            "total": total,
+        }
 
     @api_router.post("/tasks/{task_id}/cancel", response_model=TaskStatusResponse)
     async def cancel_task(
@@ -693,6 +716,18 @@ def create_app(
         db: Session = Depends(get_db),
     ) -> dict[str, Any]:
         return _pack_info_response(pack_id=int(id), db=db)
+
+    @api_router.get("/stats")
+    async def stats(
+        db: Session = Depends(get_db),
+    ) -> dict[str, Any]:
+        """Return total pack count and keyword count."""
+        pack_count = db.scalar(select(func.count(Pack.pack_id)))
+        keyword_count = db.scalar(select(func.count(Keyword.id)))
+        return {
+            "pack_count": int(pack_count) if pack_count is not None else 0,
+            "keyword_count": int(keyword_count) if keyword_count is not None else 0,
+        }
 
     # ---- Auth endpoints ----
 

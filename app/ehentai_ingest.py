@@ -823,6 +823,7 @@ class EhentaiIngestService:
                             category=str(comic_info.category),
                             crop_bbox=[x1, y1, x2, y2],
                             crop_score=float(detection.score),
+                            origin_source_path=origin_path,
                         ),
                     )
                 )

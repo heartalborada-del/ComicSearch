@@ -283,12 +283,12 @@ class TaskManager:
                 cancel_requested=int(row.cancel_requested or 0) == 1,
             )
 
-    def list_tasks(self, limit: int = 50, status_filter: str | None = None) -> list[TaskRecord]:
+    def list_tasks(self, limit: int = 50, offset: int = 0, status_filter: str | None = None) -> list[TaskRecord]:
         with self._session_factory() as db:
             query = db.query(ImportTask)
             if status_filter is not None:
                 query = query.filter(ImportTask.status == status_filter)
-            rows = query.order_by(ImportTask.created_at.desc()).limit(int(limit)).all()
+            rows = query.order_by(ImportTask.created_at.desc()).offset(int(offset)).limit(int(limit)).all()
             return [
                 TaskRecord(
                     task_id=row.task_id,
@@ -304,6 +304,13 @@ class TaskManager:
                 )
                 for row in rows
             ]
+
+    def count_tasks(self, status_filter: str | None = None) -> int:
+        with self._session_factory() as db:
+            query = db.query(ImportTask)
+            if status_filter is not None:
+                query = query.filter(ImportTask.status == status_filter)
+            return int(query.count())
 
     def cancel(self, task_id: str) -> TaskRecord | None:
         with self._session_factory() as db:

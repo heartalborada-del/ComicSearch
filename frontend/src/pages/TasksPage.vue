@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * Tasks page — list, filter, and cancel async tasks.
+ * Tasks page — list, filter, paginate, and cancel async tasks.
  * Auto-polls for pending/running task updates.
  */
 import { onMounted, onUnmounted } from 'vue'
@@ -22,10 +22,6 @@ const filterOptions: FilterOption[] = [
   { value: 'success', label: '成功' },
   { value: 'failed', label: '失败' },
 ]
-
-function setFilter(status: TaskStatus | undefined): void {
-  tasksStore.setStatusFilter(status)
-}
 
 async function handleCancel(taskId: string): Promise<void> {
   await tasksStore.cancelTaskById(taskId)
@@ -66,7 +62,7 @@ onUnmounted(() => {
         :variant="tasksStore.statusFilter === option.value ? 'flat' : 'tonal'"
         :color="tasksStore.statusFilter === option.value ? 'primary' : undefined"
         size="small"
-        @click="setFilter(option.value)"
+        @click="tasksStore.setStatusFilter(option.value)"
       >
         {{ option.label }}
         <v-badge
@@ -125,6 +121,22 @@ onUnmounted(() => {
       <v-btn variant="tonal" color="primary" to="/import" prepend-icon="mdi-plus">
         新建导入
       </v-btn>
+    </div>
+
+    <!-- Pagination -->
+    <div
+      v-if="tasksStore.totalPages > 1"
+      class="d-flex justify-center mt-4"
+    >
+      <v-pagination
+        :model-value="tasksStore.currentPage"
+        :length="tasksStore.totalPages"
+        :total-visible="5"
+        rounded="lg"
+        size="small"
+        active-color="primary"
+        @update:model-value="tasksStore.goToPage"
+      />
     </div>
 
     <!-- Polling indicator -->

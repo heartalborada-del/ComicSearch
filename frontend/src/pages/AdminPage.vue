@@ -286,7 +286,8 @@ function roleChip(user: AdminUserItem): { color: string; text: string } {
 async function loadReviewTasks(): Promise<void> {
     reviewLoading.value = true
     try {
-        reviewTasks.value = await listReviewTasks()
+        const response = await listReviewTasks()
+        reviewTasks.value = response.items
     } catch (err) {
         showToast('error', err instanceof ApiError ? err.detail : '加载审核列表失败')
     } finally {

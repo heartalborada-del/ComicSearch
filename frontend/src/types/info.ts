@@ -16,3 +16,9 @@ export interface PackInfo {
     keyword_ids: number[]
     keywords: Keyword[]
 }
+
+/** Global stats returned by GET /stats. */
+export interface StatsResponse {
+    pack_count: number
+    keyword_count: number
+}

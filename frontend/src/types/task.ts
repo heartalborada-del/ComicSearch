@@ -47,5 +47,12 @@ export interface SubmitImportResponse {
 /** Query parameters for GET /tasks. */
 export interface ListTasksParams {
     limit?: number
+    offset?: number
     status?: TaskStatus
+}
+
+/** Paginated response from GET /tasks. */
+export interface PaginatedTasks {
+    items: TaskRecord[]
+    total: number
 }

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -389,15 +390,18 @@ def upsert_db_records(
     keyword_names_by_id: dict[int, str],
 ) -> None:
     title_to_pack_id: dict[str, int] = {}
+    source_to_pack_id: dict[str, int] = {}
     source_by_pack_id: dict[int, str] = {}
-    for row in session.query(Pack.pack_id, Pack.title).all():
+    for row in session.query(Pack.pack_id, Pack.title, Pack.source).all():
+        if row.source:
+            source_to_pack_id[row.source] = int(row.pack_id)
         if not row.title:
             continue
         existing = title_to_pack_id.get(row.title)
         if existing is None or int(row.pack_id) < existing:
             title_to_pack_id[row.title] = int(row.pack_id)
 
-    # Backfill missing pack ids using stable title mapping, creating auto-increment rows when needed.
+    # Backfill missing pack ids using stable source/title mapping, creating auto-increment rows when needed.
     for item in items:
         payload = item.payload
         if payload.get("pack_id") is not None:
@@ -405,20 +409,30 @@ def upsert_db_records(
                 title_to_pack_id.setdefault(item.pack_title, int(payload["pack_id"]))
                 if item.pack_source:
                     source_by_pack_id.setdefault(int(payload["pack_id"]), item.pack_source)
+                    source_to_pack_id.setdefault(item.pack_source, int(payload["pack_id"]))
             continue
 
         if not item.pack_title:
             continue
 
-        pack_id = title_to_pack_id.get(item.pack_title)
+        # 优先按 source（画廊 URL）匹配已有 Pack，其次按标题匹配
+        pack_id: int | None = None
+        if item.pack_source:
+            pack_id = source_to_pack_id.get(item.pack_source)
+        if pack_id is None:
+            pack_id = title_to_pack_id.get(item.pack_title)
+
         if pack_id is None:
             pack = Pack(title=item.pack_title, source=item.pack_source)
             session.add(pack)
             session.flush()
             pack_id = int(pack.pack_id)
             title_to_pack_id[item.pack_title] = pack_id
+            if item.pack_source:
+                source_to_pack_id[item.pack_source] = pack_id
         elif item.pack_source:
             source_by_pack_id.setdefault(pack_id, item.pack_source)
+            source_to_pack_id.setdefault(item.pack_source, pack_id)
 
         payload["pack_id"] = pack_id
 
@@ -561,6 +575,43 @@ def export_tag_id_map(path: Path, tag_to_id: dict[str, int]) -> None:
         fp.write("\n")
 
 
+def build_dataset_covers(
+    all_items: list[IndexItem],
+    image_serve_root: Path,
+) -> None:
+    """为每个 pack 构建封面：复制第一页到 {image_serve_root}/cover/{pack_id}.jpg。
+
+    遍历所有已解析 pack_id 的索引项，按 pack 分组后取页码最小的图片作为封面，
+    拷贝到 Caddy/nginx 静态文件服务的 cover 目录下。
+    """
+    from collections import defaultdict
+
+    pages_by_pack: dict[int, list[tuple[int, Path]]] = defaultdict(list)
+    for item in all_items:
+        pack_id = item.payload.get("pack_id")
+        page_no = item.payload.get("page_no")
+        if pack_id is not None and page_no is not None:
+            pages_by_pack[int(pack_id)].append((int(page_no), item.image_path))
+
+    if not pages_by_pack:
+        return
+
+    cover_dir = image_serve_root / "cover"
+    cover_dir.mkdir(parents=True, exist_ok=True)
+
+    for pack_id, pages in sorted(pages_by_pack.items()):
+        pages.sort(key=lambda x: x[0])
+        first_page_path = pages[0][1]
+        dest = cover_dir / f"{pack_id}.jpg"
+        if dest.exists():
+            continue
+        try:
+            shutil.copy2(first_page_path, dest)
+            print(f"cover written for pack_id={pack_id} -> {dest}", file=sys.stderr)
+        except OSError:
+            print(f"failed to copy cover for pack_id={pack_id}", file=sys.stderr)
+
+
 def run_indexing(args: argparse.Namespace) -> None:
     dataset_roots = discover_dataset_roots(args.datasets_root)
     metadata_by_root = load_dataset_metadata(dataset_roots)
@@ -568,7 +619,7 @@ def run_indexing(args: argparse.Namespace) -> None:
     state_path = Path(args.resume_state).resolve()
     tag_map_output_path = Path(args.tag_map_output).resolve()
     processed_ids = set() if args.reset_state else load_state(state_path)
-    served_origin_base = Path(args.served_origin_base).resolve() if args.served_origin_base else DEFAULT_SERVED_ORIGIN_BASE.resolve()
+    image_root = Path(args.image_root).resolve() if args.image_root else DEFAULT_SERVED_ORIGIN_BASE.resolve()
 
     db_url = args.db_url or os.getenv("DATABASE_URL", "sqlite:///./comicsearch.db")
     engine = create_engine(db_url)
@@ -584,7 +635,7 @@ def run_indexing(args: argparse.Namespace) -> None:
         auto_added_tag_count = ensure_metadata_tags_mapped(metadata_by_root, tag_id_map, keyword_names_by_id)
         upsert_tag_registry(db, keyword_names_by_id)
 
-        for item in iter_page_items(dataset_roots, metadata_by_root, tag_id_map, image_name_lists_by_root, served_origin_base):
+        for item in iter_page_items(dataset_roots, metadata_by_root, tag_id_map, image_name_lists_by_root, image_root):
             if item.point_id in processed_ids or not item.image_path.exists():
                 continue
             all_items.append(item)
@@ -655,6 +706,9 @@ def run_indexing(args: argparse.Namespace) -> None:
         save_state(state_path, processed_ids)
         indexed += len(embed_batch_items)
 
+    # 为每个 pack 构建封面
+    build_dataset_covers(all_items, image_root / "served")
+
     print(
         json.dumps(
             {
@@ -708,12 +762,10 @@ def parse_args() -> argparse.Namespace:
         help="SQLAlchemy DB URL. Defaults to DATABASE_URL or sqlite:///./comicsearch.db.",
     )
     parser.add_argument(
-        "--served-origin-base",
+        "--image-root",
         default=None,
-        help="Base directory that Caddy/nginx serves origin images from. "
-             "If set, image paths relative to this base are stored as 'origin_source_path' "
-             "in Qdrant payloads for constructing origin image URLs on the frontend. "
-             "Defaults to the comics/ subdirectory under the project root.",
+        help="Caddy/nginx 静态文件根目录。图片路径相对于此目录存储为 origin_source_path，"
+             "封面也写入此目录下的 served/cover/。默认为项目根下的 comics/。",
     )
     return parser.parse_args()
 

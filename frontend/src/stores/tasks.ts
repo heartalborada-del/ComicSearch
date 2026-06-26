@@ -16,6 +16,8 @@ import type {
 
 /** Polling interval in milliseconds. */
 const POLL_INTERVAL_MS = 3000
+/** Tasks per page. */
+const PAGE_SIZE = 20
 
 export const useTasksStore = defineStore('tasks', () => {
     const tasks = ref<TaskRecord[]>([])
@@ -25,28 +27,32 @@ export const useTasksStore = defineStore('tasks', () => {
     const submitResult = ref<SubmitImportResponse | null>(null)
     const submitError = ref<string | null>(null)
 
-    /** Status filter for the task list. */
+    /** Server-side status filter. */
     const statusFilter = ref<TaskStatus | undefined>(undefined)
+
+    /** Pagination state. */
+    const totalCount = ref(0)
+    const currentPage = ref(1)
+
+    /** Total pages based on server-reported total. */
+    const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / PAGE_SIZE)))
 
     /** Whether polling is active. */
     const polling = ref(false)
     let pollTimer: ReturnType<typeof setInterval> | null = null
 
-    /** Tasks filtered by current status filter. */
-    const filteredTasks = computed(() => {
-        if (!statusFilter.value) return tasks.value
-        return tasks.value.filter((t) => t.status === statusFilter.value)
-    })
+    /** Tasks are already filtered server-side; this alias exists for backward compat. */
+    const filteredTasks = computed(() => tasks.value)
 
     /** Whether any tasks are pending or running. */
     const hasActiveTasks = computed(() =>
         tasks.value.some((t) => t.status === 'pending' || t.status === 'running'),
     )
 
-    /** Count tasks by status. */
+    /** Count tasks by status (uses server-reported total for 'all'). */
     const statusCounts = computed(() => {
         const counts: Record<string, number> = {
-            all: tasks.value.length,
+            all: totalCount.value,
             pending: 0,
             running: 0,
             success: 0,
@@ -59,19 +65,38 @@ export const useTasksStore = defineStore('tasks', () => {
     })
 
     /**
-     * Fetch the task list from the server.
+     * Fetch the task list from the server for the current page.
      */
-    async function fetchTasks(params?: ListTasksParams): Promise<void> {
+    async function fetchTasks(): Promise<void> {
         loading.value = true
         error.value = null
 
+        const params: ListTasksParams = {
+            limit: PAGE_SIZE,
+            offset: (currentPage.value - 1) * PAGE_SIZE,
+        }
+        if (statusFilter.value) {
+            params.status = statusFilter.value
+        }
+
         try {
-            tasks.value = await listTasks(params)
+            const response = await listTasks(params)
+            tasks.value = response.items
+            totalCount.value = response.total
         } catch (err) {
             error.value = err instanceof ApiError ? err.detail : '获取任务列表失败'
         } finally {
             loading.value = false
         }
+    }
+
+    /**
+     * Change the current page and re-fetch.
+     */
+    function goToPage(page: number): void {
+        if (page < 1 || page > totalPages.value) return
+        currentPage.value = page
+        fetchTasks()
     }
 
     /**
@@ -151,10 +176,12 @@ export const useTasksStore = defineStore('tasks', () => {
     }
 
     /**
-     * Set the status filter and re-fetch if needed.
+     * Set the status filter, reset to page 1, and re-fetch.
      */
     function setStatusFilter(status: TaskStatus | undefined): void {
         statusFilter.value = status
+        currentPage.value = 1
+        fetchTasks()
     }
 
     return {
@@ -169,7 +196,12 @@ export const useTasksStore = defineStore('tasks', () => {
         filteredTasks,
         hasActiveTasks,
         statusCounts,
+        totalCount,
+        currentPage,
+        totalPages,
+        PAGE_SIZE,
         fetchTasks,
+        goToPage,
         refreshActiveTasks,
         startPolling,
         stopPolling,

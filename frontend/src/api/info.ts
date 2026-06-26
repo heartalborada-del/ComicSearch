@@ -1,9 +1,9 @@
 /**
  * Pack info API module.
- * Wraps the GET /info/{id} endpoint for querying pack metadata.
+ * Wraps the GET /info/{id} and GET /stats endpoints.
  */
 import { getJson } from './client'
-import type { PackInfo } from '@/types/info'
+import type { PackInfo, StatsResponse } from '@/types/info'
 
 /**
  * Get pack metadata by pack ID.
@@ -12,4 +12,11 @@ import type { PackInfo } from '@/types/info'
  */
 export function getPackInfo(packId: number): Promise<PackInfo> {
     return getJson<PackInfo>(`/info/${packId}`)
+}
+
+/**
+ * Get global statistics (pack count and keyword count).
+ */
+export function getStats(): Promise<StatsResponse> {
+    return getJson<StatsResponse>('/stats')
 }
