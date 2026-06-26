@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 from PIL import Image
 from qdrant_client.http import models as qm
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.orm import Session
 from ultralytics import YOLO
 
@@ -488,8 +488,14 @@ class EhentaiIngestService:
 
         for keyword_id, keyword_name in session.execute(select(Keyword.id, Keyword.name)).all():
             normalized_name = normalize_tag(keyword_name)
-            id_to_tag[int(keyword_id)] = normalized_name
-            tag_to_id.setdefault(normalized_name, int(keyword_id))
+            kw_id = int(keyword_id)
+            # TagIdMap is the authoritative source for tag↔id mapping. If
+            # TagIdMap already knows this keyword_id, don't overwrite it —
+            # Keyword.name may be stale. We still setdefault so the Keyword
+            # name can serve as an alias.
+            if kw_id not in id_to_tag:
+                id_to_tag[kw_id] = normalized_name
+            tag_to_id.setdefault(normalized_name, kw_id)
 
         next_keyword_id = (max(id_to_tag.keys()) + 1) if id_to_tag else 1
         for raw_tag in tags:
@@ -503,21 +509,67 @@ class EhentaiIngestService:
             next_keyword_id += 1
 
         for keyword_id, keyword_name in sorted(id_to_tag.items()):
-            keyword = session.get(Keyword, int(keyword_id))
-            if keyword is None:
-                session.add(Keyword(id=int(keyword_id), name=keyword_name))
-            elif keyword.name != keyword_name:
+            kw_id = int(keyword_id)
+            # Keyword: INSERT OR IGNORE avoids UNIQUE conflict on id when
+            # a concurrent request already inserted the same row.
+            stmt = insert(Keyword).values(id=kw_id, name=keyword_name).prefix_with("OR IGNORE")
+            session.execute(stmt)
+            # Correct the name if the row already existed under a stale name.
+            keyword = session.get(Keyword, kw_id)
+            if keyword.name != keyword_name:
                 keyword.name = keyword_name
 
+            # TagIdMap: INSERT OR IGNORE across *all* conflicts (tag PK and
+            # keyword_id UNIQUE).  This is concurrency-safe: if another
+            # request already claimed this keyword_id with a different tag,
+            # our insert is silently dropped and we reconcile below.
             tag_row = session.get(TagIdMap, keyword_name)
             if tag_row is None:
-                session.add(TagIdMap(tag=keyword_name, keyword_id=int(keyword_id)))
+                stmt = (
+                    insert(TagIdMap)
+                    .values(tag=keyword_name, keyword_id=kw_id)
+                    .prefix_with("OR IGNORE")
+                )
+                session.execute(stmt)
             else:
                 current_keyword_id = int(cast(int, getattr(tag_row, "keyword_id")))
-                if current_keyword_id != int(keyword_id):
-                    tag_row.keyword_id = int(keyword_id)
+                if current_keyword_id != kw_id:
+                    tag_row.keyword_id = kw_id
 
         session.flush()
+
+        # Reconcile: any tag whose INSERT was silently ignored (keyword_id
+        # stolen by a concurrent insert) needs a fresh keyword_id.
+        missing = [t for t in tag_to_id if session.get(TagIdMap, t) is None]
+        if missing:
+            # Re-read DB to get the true max keyword_id after concurrent writes.
+            existing_ids = {
+                int(kid) for kid, in session.execute(select(TagIdMap.keyword_id)).all()
+            }
+            existing_ids.update(
+                int(kid) for kid, in session.execute(select(Keyword.id)).all()
+            )
+            next_id = (max(existing_ids) + 1) if existing_ids else 1
+
+            for tag_name in missing:
+                while next_id in existing_ids:
+                    next_id += 1
+                existing_ids.add(next_id)
+                # Use INSERT OR IGNORE here too for the same concurrency safety.
+                session.execute(
+                    insert(Keyword)
+                    .values(id=next_id, name=tag_name)
+                    .prefix_with("OR IGNORE")
+                )
+                session.execute(
+                    insert(TagIdMap)
+                    .values(tag=tag_name, keyword_id=next_id)
+                    .prefix_with("OR IGNORE")
+                )
+                tag_to_id[tag_name] = next_id
+                next_id += 1
+
+            session.flush()
         return tag_to_id
 
     @staticmethod
